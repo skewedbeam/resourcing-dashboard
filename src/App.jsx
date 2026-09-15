@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { Grid3x3, Activity, TrendingUp, Plus, X } from "lucide-react";
+import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 // ---------- Design tokens ----------
@@ -70,17 +70,22 @@ const SEED_PROJECTS = [
   { id: "pr2", name: "Intranet Modernisation - Client B", startDate: "2026-03-02", endDate: "2026-06-26" },
 ];
 
+// Sample allocation dates, including a couple deliberately outside their
+// project's window and one left unconfirmed, to demonstrate the alert and
+// the confirm/edit toggle.
 const SEED_ALLOCATIONS = {
-  "p1|pr1": { pct: 60, startDate: "2026-01-05", endDate: "2026-08-28" },
-  "p1|pr2": { pct: 20, startDate: "2026-03-02", endDate: "2026-06-26" },
-  "p2|pr1": { pct: 80, startDate: "2026-01-05", endDate: "2026-08-28" },
-  "p3|pr2": { pct: 70, startDate: "2026-03-02", endDate: "2026-06-26" },
-  "p4|pr1": { pct: 40, startDate: "2026-01-05", endDate: "2026-08-28" },
-  "p4|pr2": { pct: 30, startDate: "2026-03-02", endDate: "2026-06-26" },
-  "p5|pr1": { pct: 50, startDate: "2026-01-05", endDate: "2026-08-28" },
-  "p5|pr2": { pct: 50, startDate: "2026-03-02", endDate: "2026-06-26" },
-  "p6|pr1": { pct: 30, startDate: "2026-01-05", endDate: "2026-08-28" },
+  "p1|pr1": { pct: 60, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true },
+  "p1|pr2": { pct: 20, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: true },
+  "p2|pr1": { pct: 80, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true },
+  "p3|pr2": { pct: 70, startDate: "2026-03-02", endDate: "2026-07-15", confirmed: true },
+  "p4|pr1": { pct: 40, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true },
+  "p4|pr2": { pct: 30, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: false },
+  "p5|pr1": { pct: 50, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true },
+  "p5|pr2": { pct: 50, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: true },
+  "p6|pr1": { pct: 30, startDate: "2025-12-15", endDate: "2026-08-28", confirmed: true },
 };
+
+const SEED_LOCKED_PEOPLE = { p1: true, p2: true };
 
 const SEED_UPCOMING = [
   { id: "u1", name: "Data Warehouse Build - Prospect C", requiredSkillIds: ["s5", "s3"], note: "Kickoff expected next quarter" },
@@ -181,11 +186,19 @@ function allocStart(entry) {
 function allocEnd(entry) {
   return typeof entry === "object" && entry ? entry.endDate || "" : "";
 }
+function allocConfirmed(entry) {
+  return typeof entry === "object" && entry ? !!entry.confirmed : false;
+}
 function formatDate(iso) {
   if (!iso) return "";
   const d = new Date(`${iso}T00:00:00`);
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+// ISO yyyy-mm-dd strings compare lexically the same as chronologically.
+function isOutsideWindow(allocStart, allocEnd, projStart, projEnd) {
+  if (!allocStart || !allocEnd || !projStart || !projEnd) return false;
+  return allocStart < projStart || allocEnd > projEnd;
 }
 
 export default function App() {
@@ -193,7 +206,7 @@ export default function App() {
 
   const [peopleData, setPeopleData, peopleLoaded, peopleError] = useSupabaseState(
     "people-skills",
-    { people: SEED_PEOPLE, skills: SEED_SKILLS, skillLevels: SEED_SKILL_LEVELS }
+    { people: SEED_PEOPLE, skills: SEED_SKILLS, skillLevels: SEED_SKILL_LEVELS, lockedPeople: SEED_LOCKED_PEOPLE }
   );
   const [allocData, setAllocData, allocLoaded, allocError] = useSupabaseState(
     "projects-allocations",
@@ -206,7 +219,7 @@ export default function App() {
 
   const loaded = peopleLoaded && allocLoaded && upcomingLoaded;
   const connectionError = peopleError || allocError || upcomingError;
-  const { people, skills, skillLevels } = peopleData;
+  const { people, skills, skillLevels, lockedPeople = {} } = peopleData;
   const { projects, allocations } = allocData;
   const { upcoming } = upcomingData;
 
@@ -302,11 +315,13 @@ export default function App() {
               people={people}
               skills={skills}
               skillLevels={skillLevels}
-              onChange={(next) => setPeopleData({ people, skills, skillLevels: next })}
-              onAddPerson={(person) => setPeopleData({ people: [...people, person], skills, skillLevels })}
-              onAddSkill={(skill) => setPeopleData({ people, skills: [...skills, skill], skillLevels })}
-              onRemovePerson={(id) => setPeopleData({ people: people.filter((p) => p.id !== id), skills, skillLevels })}
-              onRemoveSkill={(id) => setPeopleData({ people, skills: skills.filter((s) => s.id !== id), skillLevels })}
+              lockedPeople={lockedPeople}
+              onChange={(next) => setPeopleData({ people, skills, skillLevels: next, lockedPeople })}
+              onAddPerson={(person) => setPeopleData({ people: [...people, person], skills, skillLevels, lockedPeople })}
+              onAddSkill={(skill) => setPeopleData({ people, skills: [...skills, skill], skillLevels, lockedPeople })}
+              onRemovePerson={(id) => setPeopleData({ people: people.filter((p) => p.id !== id), skills, skillLevels, lockedPeople })}
+              onRemoveSkill={(id) => setPeopleData({ people, skills: skills.filter((s) => s.id !== id), skillLevels, lockedPeople })}
+              onToggleLock={(personId) => setPeopleData({ people, skills, skillLevels, lockedPeople: { ...lockedPeople, [personId]: !lockedPeople[personId] } })}
             />
           ) : tab === "current" ? (
             <CurrentUtilisation
@@ -339,11 +354,12 @@ export default function App() {
 }
 
 // ---------- Skill matrix ----------
-function SkillMatrix({ people, skills, skillLevels, onChange, onAddPerson, onAddSkill, onRemovePerson, onRemoveSkill }) {
+function SkillMatrix({ people, skills, skillLevels, lockedPeople, onChange, onAddPerson, onAddSkill, onRemovePerson, onRemoveSkill, onToggleLock }) {
   const [newPerson, setNewPerson] = useState("");
   const [newSkill, setNewSkill] = useState("");
 
   const cycle = (personId, skillId) => {
+    if (lockedPeople[personId]) return;
     const key = `${personId}|${skillId}`;
     const current = skillLevels[key] || 0;
     const next = (current + 1) % 5;
@@ -355,7 +371,7 @@ function SkillMatrix({ people, skills, skillLevels, onChange, onAddPerson, onAdd
       <div style={{ marginBottom: 18 }}>
         <div style={{ fontSize: 19, fontWeight: 600 }}>Skill matrix</div>
         <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
-          Click a cell to cycle proficiency: None, Basic, Working, Advanced, Expert.
+          Click a cell to cycle proficiency: None, Basic, Working, Advanced, Expert. Lock a row to stop it from being changed.
         </div>
       </div>
 
@@ -377,31 +393,50 @@ function SkillMatrix({ people, skills, skillLevels, onChange, onAddPerson, onAdd
             </tr>
           </thead>
           <tbody>
-            {people.map((p) => (
-              <tr key={p.id}>
-                <td className="rowhead">
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                    <div>
-                      <div style={{ fontWeight: 600 }}>{p.name}</div>
-                      <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{p.role}</div>
+            {people.map((p) => {
+              const locked = !!lockedPeople[p.id];
+              return (
+                <tr key={p.id}>
+                  <td className="rowhead">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <div>
+                        <div style={{ fontWeight: 600 }}>{p.name}</div>
+                        <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{p.role}</div>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <button
+                          className="rd-remove-btn"
+                          onClick={() => onToggleLock(p.id)}
+                          title={locked ? "Unlock proficiency editing" : "Lock proficiency editing"}
+                          style={{ color: locked ? "var(--warn)" : "var(--text-muted)" }}
+                        >
+                          {locked ? <Lock size={12} /> : <Unlock size={12} />}
+                        </button>
+                        <button className="rd-remove-btn" onClick={() => onRemovePerson(p.id)} title="Remove person">
+                          <X size={12} />
+                        </button>
+                      </div>
                     </div>
-                    <button className="rd-remove-btn" onClick={() => onRemovePerson(p.id)} title="Remove person">
-                      <X size={12} />
-                    </button>
-                  </div>
-                </td>
-                {skills.map((s) => {
-                  const level = skillLevels[`${p.id}|${s.id}`] || 0;
-                  return (
-                    <td key={s.id} style={{ padding: 0, background: levelColor(level) }}>
-                      <button className="rd-cell-btn" onClick={() => cycle(p.id, s.id)} title={LEVEL_LABELS[level]}>
-                        {level === 0 ? "-" : LEVEL_LABELS[level]}
-                      </button>
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
+                  </td>
+                  {skills.map((s) => {
+                    const level = skillLevels[`${p.id}|${s.id}`] || 0;
+                    return (
+                      <td key={s.id} style={{ padding: 0, background: levelColor(level) }}>
+                        <button
+                          className="rd-cell-btn"
+                          onClick={() => cycle(p.id, s.id)}
+                          title={locked ? "Locked" : LEVEL_LABELS[level]}
+                          disabled={locked}
+                          style={{ cursor: locked ? "not-allowed" : "pointer", opacity: locked ? 0.6 : 1 }}
+                        >
+                          {level === 0 ? "-" : LEVEL_LABELS[level]}
+                        </button>
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -437,7 +472,16 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
     const existing = allocations[key];
     onChangeAllocations({
       ...allocations,
-      [key]: { pct: allocPct(existing), startDate: allocStart(existing), endDate: allocEnd(existing), [field]: value },
+      [key]: { pct: allocPct(existing), startDate: allocStart(existing), endDate: allocEnd(existing), confirmed: false, [field]: value },
+    });
+  };
+
+  const setConfirmed = (personId, projectId, value) => {
+    const key = `${personId}|${projectId}`;
+    const existing = allocations[key];
+    onChangeAllocations({
+      ...allocations,
+      [key]: { pct: allocPct(existing), startDate: allocStart(existing), endDate: allocEnd(existing), confirmed: value },
     });
   };
 
@@ -493,8 +537,12 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
                   {projects.map((pr) => {
                     const key = `${p.id}|${pr.id}`;
                     const entry = allocations[key];
+                    const start = allocStart(entry);
+                    const end = allocEnd(entry);
+                    const confirmed = allocConfirmed(entry);
+                    const outOfWindow = isOutsideWindow(start, end, pr.startDate, pr.endDate);
                     return (
-                      <td key={pr.id}>
+                      <td key={pr.id} style={outOfWindow ? { background: "var(--danger-light)" } : undefined}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
                           <input
                             className="rd-input"
@@ -504,23 +552,57 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
                           />
                           <span style={{ fontSize: 11, color: "var(--text-muted)" }}>%</span>
                         </div>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, marginTop: 4 }}>
-                          <input
-                            className="rd-date"
-                            type="date"
-                            title="Allocation start date"
-                            value={allocStart(entry)}
-                            onChange={(e) => setAllocDate(p.id, pr.id, "startDate", e.target.value)}
-                          />
-                          <span style={{ fontSize: 10, color: "var(--text-muted)" }}>&rarr;</span>
-                          <input
-                            className="rd-date"
-                            type="date"
-                            title="Allocation end date"
-                            value={allocEnd(entry)}
-                            onChange={(e) => setAllocDate(p.id, pr.id, "endDate", e.target.value)}
-                          />
-                        </div>
+
+                        {confirmed ? (
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, marginTop: 4 }}>
+                            <span style={{ fontSize: 10.5, color: "var(--text-muted)" }}>
+                              {formatDate(start)} &rarr; {formatDate(end)}
+                            </span>
+                            <button
+                              className="rd-remove-btn"
+                              onClick={() => setConfirmed(p.id, pr.id, false)}
+                              title="Edit allocation dates"
+                            >
+                              <Pencil size={11} />
+                            </button>
+                          </div>
+                        ) : (
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, marginTop: 4, flexWrap: "wrap" }}>
+                            <input
+                              className="rd-date"
+                              type="date"
+                              title="Allocation start date"
+                              value={start}
+                              onChange={(e) => setAllocDate(p.id, pr.id, "startDate", e.target.value)}
+                            />
+                            <span style={{ fontSize: 10, color: "var(--text-muted)" }}>&rarr;</span>
+                            <input
+                              className="rd-date"
+                              type="date"
+                              title="Allocation end date"
+                              value={end}
+                              onChange={(e) => setAllocDate(p.id, pr.id, "endDate", e.target.value)}
+                            />
+                            <button
+                              className="rd-remove-btn"
+                              onClick={() => start && end && setConfirmed(p.id, pr.id, true)}
+                              title={start && end ? "Confirm allocation dates" : "Set both dates to confirm"}
+                              disabled={!start || !end}
+                              style={{ color: start && end ? "var(--accent)" : "var(--border)", cursor: start && end ? "pointer" : "not-allowed" }}
+                            >
+                              <Check size={12} />
+                            </button>
+                          </div>
+                        )}
+
+                        {outOfWindow && (
+                          <div
+                            style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, marginTop: 3, color: "var(--danger)", fontSize: 10 }}
+                            title="Allocation dates fall outside the project's duration"
+                          >
+                            <AlertTriangle size={11} /> Outside project window
+                          </div>
+                        )}
                       </td>
                     );
                   })}
