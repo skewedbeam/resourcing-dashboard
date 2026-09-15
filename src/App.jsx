@@ -66,17 +66,20 @@ const SEED_SKILL_LEVELS = {
 };
 
 const SEED_PROJECTS = [
-  { id: "pr1", name: "Core Banking Migration - Client A" },
-  { id: "pr2", name: "Intranet Modernisation - Client B" },
+  { id: "pr1", name: "Core Banking Migration - Client A", startDate: "2026-01-05", endDate: "2026-08-28" },
+  { id: "pr2", name: "Intranet Modernisation - Client B", startDate: "2026-03-02", endDate: "2026-06-26" },
 ];
 
 const SEED_ALLOCATIONS = {
-  "p1|pr1": 60, "p1|pr2": 20,
-  "p2|pr1": 80,
-  "p3|pr2": 70,
-  "p4|pr1": 40, "p4|pr2": 30,
-  "p5|pr1": 50, "p5|pr2": 50,
-  "p6|pr1": 30,
+  "p1|pr1": { pct: 60, startDate: "2026-01-05", endDate: "2026-08-28" },
+  "p1|pr2": { pct: 20, startDate: "2026-03-02", endDate: "2026-06-26" },
+  "p2|pr1": { pct: 80, startDate: "2026-01-05", endDate: "2026-08-28" },
+  "p3|pr2": { pct: 70, startDate: "2026-03-02", endDate: "2026-06-26" },
+  "p4|pr1": { pct: 40, startDate: "2026-01-05", endDate: "2026-08-28" },
+  "p4|pr2": { pct: 30, startDate: "2026-03-02", endDate: "2026-06-26" },
+  "p5|pr1": { pct: 50, startDate: "2026-01-05", endDate: "2026-08-28" },
+  "p5|pr2": { pct: 50, startDate: "2026-03-02", endDate: "2026-06-26" },
+  "p6|pr1": { pct: 30, startDate: "2026-01-05", endDate: "2026-08-28" },
 };
 
 const SEED_UPCOMING = [
@@ -166,6 +169,25 @@ function pctColor(pct) {
   return "var(--accent)";
 }
 
+// Allocation entries used to be a bare percentage number; they are now
+// { pct, startDate, endDate }. These helpers read either shape safely.
+function allocPct(entry) {
+  if (typeof entry === "number") return entry;
+  return entry?.pct || 0;
+}
+function allocStart(entry) {
+  return typeof entry === "object" && entry ? entry.startDate || "" : "";
+}
+function allocEnd(entry) {
+  return typeof entry === "object" && entry ? entry.endDate || "" : "";
+}
+function formatDate(iso) {
+  if (!iso) return "";
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+
 export default function App() {
   const [tab, setTab] = useState("skills");
 
@@ -192,7 +214,7 @@ export default function App() {
     const totals = {};
     people.forEach((p) => {
       totals[p.id] = projects.reduce(
-        (sum, pr) => sum + (allocations[`${p.id}|${pr.id}`] || 0),
+        (sum, pr) => sum + allocPct(allocations[`${p.id}|${pr.id}`]),
         0
       );
     });
@@ -204,7 +226,7 @@ export default function App() {
       people.map((p) => {
         const row = { name: p.name.replace("Team Member ", "TM"), total: totalsByPerson[p.id] };
         projects.forEach((pr) => {
-          row[pr.name] = allocations[`${p.id}|${pr.id}`] || 0;
+          row[pr.name] = allocPct(allocations[`${p.id}|${pr.id}`]);
         });
         return row;
       }),
@@ -235,6 +257,7 @@ export default function App() {
         .rd-table td.rowhead, .rd-table th.corner { text-align:left; position:sticky; left:0; background:var(--panel); z-index:1; }
         .rd-cell-btn { width:100%; height:100%; border:none; cursor:pointer; padding:6px 0; font-family:var(--mono); font-size:12px; color:var(--text); background:transparent; }
         .rd-input { font-family:var(--mono); font-size:13px; width:56px; text-align:center; border:1px solid var(--border); border-radius:3px; padding:3px 2px; background:var(--panel); color:var(--text); }
+        .rd-date { font-family:var(--sans); font-size:11px; width:118px; text-align:center; border:1px solid var(--border); border-radius:3px; padding:2px; background:var(--panel); color:var(--text-muted); }
         .rd-tag { display:inline-block; padding:2px 8px; border-radius:3px; background:var(--accent-light); color:var(--accent); font-size:11.5px; margin:2px 3px 0 0; }
         .rd-add-btn { display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--accent); background:none; border:1px dashed var(--border); border-radius:4px; padding:6px 10px; cursor:pointer; }
         .rd-remove-btn { border:none; background:none; cursor:pointer; color:var(--text-muted); padding:2px; }
@@ -396,10 +419,34 @@ function SkillMatrix({ people, skills, skillLevels, onChange, onAddPerson, onAdd
 // ---------- Current utilisation ----------
 function CurrentUtilisation({ people, projects, allocations, totalsByPerson, chartData, projectColors, onChangeAllocations, onAddProject, onRemoveProject }) {
   const [newProject, setNewProject] = useState("");
+  const [newProjectStart, setNewProjectStart] = useState("");
+  const [newProjectEnd, setNewProjectEnd] = useState("");
 
   const setPct = (personId, projectId, value) => {
     const num = Math.max(0, Math.min(999, Number(value) || 0));
-    onChangeAllocations({ ...allocations, [`${personId}|${projectId}`]: num });
+    const key = `${personId}|${projectId}`;
+    const existing = allocations[key];
+    onChangeAllocations({
+      ...allocations,
+      [key]: { pct: num, startDate: allocStart(existing), endDate: allocEnd(existing) },
+    });
+  };
+
+  const setAllocDate = (personId, projectId, field, value) => {
+    const key = `${personId}|${projectId}`;
+    const existing = allocations[key];
+    onChangeAllocations({
+      ...allocations,
+      [key]: { pct: allocPct(existing), startDate: allocStart(existing), endDate: allocEnd(existing), [field]: value },
+    });
+  };
+
+  const addProject = () => {
+    if (!newProject.trim()) return;
+    onAddProject({ id: `pr${Date.now()}`, name: newProject.trim(), startDate: newProjectStart, endDate: newProjectEnd });
+    setNewProject("");
+    setNewProjectStart("");
+    setNewProjectEnd("");
   };
 
   return (
@@ -407,7 +454,7 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
       <div style={{ marginBottom: 18 }}>
         <div style={{ fontSize: 19, fontWeight: 600 }}>Current utilisation</div>
         <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
-          Allocation percentage per project. Totals above 100% are flagged.
+          Allocation percentage and allocated dates per project, per team member. Totals above 100% are flagged.
         </div>
       </div>
 
@@ -424,6 +471,11 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
                       <X size={11} />
                     </button>
                   </div>
+                  {(pr.startDate || pr.endDate) && (
+                    <div style={{ fontSize: 10.5, fontWeight: 400, color: "var(--text-muted)", marginTop: 3 }}>
+                      {formatDate(pr.startDate) || "?"} &ndash; {formatDate(pr.endDate) || "?"}
+                    </div>
+                  )}
                 </th>
               ))}
               <th>Total</th>
@@ -438,17 +490,40 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
                     <div style={{ fontWeight: 600 }}>{p.name}</div>
                     <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{p.role}</div>
                   </td>
-                  {projects.map((pr) => (
-                    <td key={pr.id}>
-                      <input
-                        className="rd-input"
-                        type="number"
-                        value={allocations[`${p.id}|${pr.id}`] || 0}
-                        onChange={(e) => setPct(p.id, pr.id, e.target.value)}
-                      />
-                      <span style={{ fontSize: 11, color: "var(--text-muted)" }}> %</span>
-                    </td>
-                  ))}
+                  {projects.map((pr) => {
+                    const key = `${p.id}|${pr.id}`;
+                    const entry = allocations[key];
+                    return (
+                      <td key={pr.id}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
+                          <input
+                            className="rd-input"
+                            type="number"
+                            value={allocPct(entry)}
+                            onChange={(e) => setPct(p.id, pr.id, e.target.value)}
+                          />
+                          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>%</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, marginTop: 4 }}>
+                          <input
+                            className="rd-date"
+                            type="date"
+                            title="Allocation start date"
+                            value={allocStart(entry)}
+                            onChange={(e) => setAllocDate(p.id, pr.id, "startDate", e.target.value)}
+                          />
+                          <span style={{ fontSize: 10, color: "var(--text-muted)" }}>&rarr;</span>
+                          <input
+                            className="rd-date"
+                            type="date"
+                            title="Allocation end date"
+                            value={allocEnd(entry)}
+                            onChange={(e) => setAllocDate(p.id, pr.id, "endDate", e.target.value)}
+                          />
+                        </div>
+                      </td>
+                    );
+                  })}
                   <td style={{ fontFamily: "var(--mono)", fontWeight: 700, color: pctColor(total) }}>
                     {total}%
                   </td>
@@ -459,8 +534,20 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
         </table>
       </div>
 
-      <AddRow placeholder="New project name" value={newProject} setValue={setNewProject}
-        onAdd={() => { if (newProject.trim()) { onAddProject({ id: `pr${Date.now()}`, name: newProject.trim() }); setNewProject(""); } }} />
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <input
+          className="rd-text"
+          placeholder="New project name"
+          value={newProject}
+          onChange={(e) => setNewProject(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") addProject(); }}
+          style={{ minWidth: 200 }}
+        />
+        <input className="rd-text" type="date" title="Project start date" value={newProjectStart} onChange={(e) => setNewProjectStart(e.target.value)} />
+        <span style={{ fontSize: 12, color: "var(--text-muted)" }}>to</span>
+        <input className="rd-text" type="date" title="Project end date" value={newProjectEnd} onChange={(e) => setNewProjectEnd(e.target.value)} />
+        <button className="rd-add-btn" onClick={addProject}><Plus size={13} /> Add</button>
+      </div>
 
       <div style={{ marginTop: 26, background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "18px 20px" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Allocation by person</div>
