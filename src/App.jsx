@@ -880,17 +880,22 @@ function Dashboard({ people, skills, skillLevels, projects, allocations, upcomin
       .map((p) => ({ person: p, total: totalsByPerson[p.id] || 0, proposed: proposedTotalsByPerson[p.id] || 0 }))
       .sort((a, b) => b.total - a.total);
 
-    const skillGaps = [];
-    upcoming.forEach((u) => {
-      (u.requiredSkillIds || []).forEach((sid) => {
-        const skill = skills.find((s) => s.id === sid);
-        if (!skill) return;
-        const maxLevel = Math.max(0, ...people.map((p) => skillLevels[`${p.id}|${sid}`] || 0));
-        if (maxLevel < 3) skillGaps.push({ project: u.name, skill: skill.name });
-      });
+    // Per upcoming project, every required skill plus whether anyone on the
+    // team is already Advanced (3) or Expert (4) in it - not just a flat
+    // "has a gap" flag, so the reader can see what's fine as well as what isn't.
+    const pipelineCoverage = upcoming.map((u) => {
+      const skillRows = (u.requiredSkillIds || [])
+        .map((sid) => {
+          const skill = skills.find((s) => s.id === sid);
+          if (!skill) return null;
+          const maxLevel = Math.max(0, ...people.map((p) => skillLevels[`${p.id}|${sid}`] || 0));
+          return { skill, maxLevel, covered: maxLevel >= 3 };
+        })
+        .filter(Boolean);
+      return { project: u, skillRows, gapCount: skillRows.filter((r) => !r.covered).length };
     });
 
-    return { avgUtil, overCommitted, benchFte, pendingProposals, projectRows, teamRows, skillGaps };
+    return { avgUtil, overCommitted, benchFte, pendingProposals, projectRows, teamRows, pipelineCoverage };
   }, [people, skills, skillLevels, projects, allocations, upcoming, totalsByPerson, proposedTotalsByPerson]);
 
   const cards = [
@@ -1008,30 +1013,51 @@ function Dashboard({ people, skills, skillLevels, projects, allocations, upcomin
       </div>
 
       <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "16px 18px" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Pipeline & skill gaps</div>
+        <div style={{ fontSize: 14, fontWeight: 600 }}>Pipeline & skill gaps</div>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3, marginBottom: 14 }}>
+          Every required skill for each upcoming project, and whether anyone on the team is already
+          Advanced or Expert in it. <span style={{ color: "var(--accent)", fontWeight: 600 }}>Green</span> means
+          yes; <span style={{ color: "var(--danger)", fontWeight: 600 }}>red</span> means no one is yet - a
+          gap to plan for, via hiring, training, or bringing someone in.
+        </div>
         {upcoming.length === 0 ? (
           <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>No upcoming projects tracked.</div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {upcoming.map((u) => {
-              const gaps = stats.skillGaps.filter((g) => g.project === u.name);
-              return (
-                <div key={u.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{u.name}</div>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {gaps.length === 0 ? (
-                      <span className="rd-tag">Covered</span>
-                    ) : (
-                      gaps.map((g) => (
-                        <span key={g.skill} className="rd-tag" style={{ background: "var(--danger-light)", color: "var(--danger)" }}>
-                          Gap: {g.skill}
-                        </span>
-                      ))
-                    )}
-                  </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {stats.pipelineCoverage.map(({ project, skillRows, gapCount }) => (
+              <div key={project.id} style={{ borderBottom: "1px solid var(--border)", paddingBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{project.name}</div>
+                  {skillRows.length > 0 && (
+                    <div style={{ fontSize: 11, color: gapCount > 0 ? "var(--danger)" : "var(--accent)", fontWeight: 600 }}>
+                      {gapCount > 0 ? `${gapCount} of ${skillRows.length} skill${skillRows.length === 1 ? "" : "s"} not yet covered` : "All required skills covered"}
+                    </div>
+                  )}
                 </div>
-              );
-            })}
+                {skillRows.length === 0 ? (
+                  <span style={{ fontSize: 11.5, color: "var(--text-muted)", fontStyle: "italic" }}>No required skills set for this project</span>
+                ) : (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {skillRows.map((r) => (
+                      <span
+                        key={r.skill.id}
+                        className="rd-tag"
+                        title={r.covered ? `Best match on the team: ${LEVEL_LABELS[r.maxLevel]}` : "No one on the team is Advanced or Expert in this skill yet"}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          background: r.covered ? "var(--accent-light)" : "var(--danger-light)",
+                          color: r.covered ? "var(--accent)" : "var(--danger)",
+                        }}
+                      >
+                        {r.covered ? <Check size={11} /> : <AlertTriangle size={11} />} {r.skill.name}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </div>
