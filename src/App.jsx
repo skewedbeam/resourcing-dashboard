@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle } from "lucide-react";
+import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 // ---------- Design tokens ----------
@@ -86,6 +86,12 @@ const SEED_ALLOCATIONS = {
 };
 
 const SEED_LOCKED_PEOPLE = { p1: true, p2: true };
+
+const SEED_APP_SETTINGS = { logRetentionDays: 30, clearLog: [] };
+
+// Client-side gate only (this app has no login/backend) - prevents accidental
+// clicks, not a real access control. Set VITE_CLEAR_DATA_PASSWORD to override.
+const CLEAR_DATA_PASSWORD = import.meta.env.VITE_CLEAR_DATA_PASSWORD || "clear-data";
 
 const SEED_UPCOMING = [
   { id: "u1", name: "Data Warehouse Build - Prospect C", requiredSkillIds: ["s5", "s3"], note: "Kickoff expected next quarter" },
@@ -201,6 +207,11 @@ function isOutsideWindow(allocStart, allocEnd, projStart, projEnd) {
   return allocStart < projStart || allocEnd > projEnd;
 }
 
+function pruneClearLog(log, retentionDays) {
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  return (log || []).filter((entry) => new Date(entry.clearedAt).getTime() >= cutoff);
+}
+
 export default function App() {
   const [tab, setTab] = useState("skills");
 
@@ -216,12 +227,39 @@ export default function App() {
     "upcoming-projects",
     { upcoming: SEED_UPCOMING }
   );
+  const [appSettingsData, setAppSettingsData, appSettingsLoaded, appSettingsError] = useSupabaseState(
+    "app-settings",
+    SEED_APP_SETTINGS
+  );
 
-  const loaded = peopleLoaded && allocLoaded && upcomingLoaded;
-  const connectionError = peopleError || allocError || upcomingError;
+  const loaded = peopleLoaded && allocLoaded && upcomingLoaded && appSettingsLoaded;
+  const connectionError = peopleError || allocError || upcomingError || appSettingsError;
   const { people, skills, skillLevels, lockedPeople = {} } = peopleData;
   const { projects, allocations } = allocData;
   const { upcoming } = upcomingData;
+  const { logRetentionDays = 30, clearLog = [] } = appSettingsData;
+
+  const CLEAR_LABELS = {
+    "people-skills": "Skill matrix",
+    "projects-allocations": "Current utilisation",
+    "upcoming-projects": "Forward capacity",
+    all: "All resourcing data",
+  };
+
+  const clearScope = async (scope) => {
+    if (scope === "people-skills" || scope === "all") {
+      await setPeopleData({ people: [], skills: [], skillLevels: {}, lockedPeople: {} });
+    }
+    if (scope === "projects-allocations" || scope === "all") {
+      await setAllocData({ projects: [], allocations: {} });
+    }
+    if (scope === "upcoming-projects" || scope === "all") {
+      await setUpcomingData({ upcoming: [] });
+    }
+    const entry = { id: `log${Date.now()}`, scope, label: CLEAR_LABELS[scope], clearedAt: new Date().toISOString() };
+    const nextLog = [entry, ...pruneClearLog(clearLog, logRetentionDays)];
+    await setAppSettingsData({ logRetentionDays, clearLog: nextLog });
+  };
 
   const totalsByPerson = useMemo(() => {
     const totals = {};
@@ -297,6 +335,10 @@ export default function App() {
           <button className={`rd-sidebar-btn ${tab === "forward" ? "active" : ""}`} onClick={() => setTab("forward")}>
             <TrendingUp size={15} /> Forward capacity
           </button>
+          <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", margin: "10px 0" }} />
+          <button className={`rd-sidebar-btn ${tab === "settings" ? "active" : ""}`} onClick={() => setTab("settings")}>
+            <Settings size={15} /> Settings
+          </button>
           <div style={{ marginTop: "auto", padding: "14px 16px", fontSize: 10.5, color: "rgba(255,255,255,0.35)", lineHeight: 1.5 }}>
             Live shared data. Anyone with this URL can view and edit, there is no login.
           </div>
@@ -335,7 +377,7 @@ export default function App() {
               onAddProject={(project) => setAllocData({ projects: [...projects, project], allocations })}
               onRemoveProject={(id) => setAllocData({ projects: projects.filter((p) => p.id !== id), allocations })}
             />
-          ) : (
+          ) : tab === "forward" ? (
             <ForwardCapacity
               people={people}
               skills={skills}
@@ -345,6 +387,17 @@ export default function App() {
               totalsByPerson={totalsByPerson}
               onAddUpcoming={(proj) => setUpcomingData({ upcoming: [...upcoming, proj] })}
               onRemoveUpcoming={(id) => setUpcomingData({ upcoming: upcoming.filter((u) => u.id !== id) })}
+            />
+          ) : (
+            <SettingsPage
+              people={people}
+              skills={skills}
+              projects={projects}
+              upcoming={upcoming}
+              logRetentionDays={logRetentionDays}
+              clearLog={clearLog}
+              onClearScope={clearScope}
+              onSetRetentionDays={(days) => setAppSettingsData({ logRetentionDays: days, clearLog })}
             />
           )}
         </div>
@@ -771,6 +824,165 @@ function ForwardCapacity({ people, skills, skillLevels, upcoming, capacityData, 
         >
           <Plus size={13} /> Add project
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Settings ----------
+function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, clearLog, onClearScope, onSetRetentionDays }) {
+  const [pendingScope, setPendingScope] = useState(null);
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [retentionDraft, setRetentionDraft] = useState(String(logRetentionDays));
+
+  useEffect(() => {
+    setRetentionDraft(String(logRetentionDays));
+  }, [logRetentionDays]);
+
+  const openConfirm = (scope) => {
+    setPendingScope(scope);
+    setPassword("");
+    setError("");
+  };
+  const cancelConfirm = () => {
+    setPendingScope(null);
+    setPassword("");
+    setError("");
+  };
+
+  const confirmClear = async () => {
+    if (password !== CLEAR_DATA_PASSWORD) {
+      setError("Incorrect password.");
+      return;
+    }
+    setBusy(true);
+    await onClearScope(pendingScope);
+    setBusy(false);
+    cancelConfirm();
+  };
+
+  const commitRetention = () => {
+    const num = Math.max(1, Math.min(365, Number(retentionDraft) || logRetentionDays));
+    setRetentionDraft(String(num));
+    if (num !== logRetentionDays) onSetRetentionDays(num);
+  };
+
+  const visibleLog = pruneClearLog(clearLog, logRetentionDays);
+
+  const cards = [
+    { key: "people-skills", label: "Skill matrix data", detail: `${people.length} team members · ${skills.length} skills · all proficiency levels` },
+    { key: "projects-allocations", label: "Current utilisation data", detail: `${projects.length} projects · all allocation percentages and dates` },
+    { key: "upcoming-projects", label: "Forward capacity data", detail: `${upcoming.length} upcoming projects` },
+    { key: "all", label: "Everything", detail: "All of the above, across the whole dashboard" },
+  ];
+
+  return (
+    <div>
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 19, fontWeight: 600 }}>Settings</div>
+        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
+          Clear stored data. This updates the shared data for everyone immediately and cannot be undone.
+        </div>
+      </div>
+
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>Danger zone</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 28 }}>
+        {cards.map((c) => (
+          <div key={c.key} style={{ background: "var(--panel)", border: "1px solid var(--danger)", borderRadius: 6, padding: "14px 16px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13.5 }}>{c.label}</div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{c.detail}</div>
+              </div>
+              {pendingScope !== c.key && (
+                <button className="rd-add-btn" style={{ color: "var(--danger)", borderColor: "var(--danger)" }} onClick={() => openConfirm(c.key)}>
+                  <Trash2 size={13} /> Clear
+                </button>
+              )}
+            </div>
+
+            {pendingScope === c.key && (
+              <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ fontSize: 12, color: "var(--danger)", display: "flex", alignItems: "center", gap: 5 }}>
+                  <ShieldAlert size={13} /> Enter the password to permanently clear this data.
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={{ position: "relative" }}>
+                    <input
+                      className="rd-text"
+                      type={showPassword ? "text" : "password"}
+                      placeholder="Password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") confirmClear(); }}
+                      style={{ minWidth: 180, paddingRight: 30 }}
+                      autoFocus
+                    />
+                    <button
+                      onClick={() => setShowPassword((v) => !v)}
+                      title={showPassword ? "Hide password" : "Show password"}
+                      style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", border: "none", background: "none", cursor: "pointer", color: "var(--text-muted)" }}
+                    >
+                      {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                  <button className="rd-add-btn" style={{ color: "var(--danger)", borderColor: "var(--danger)" }} onClick={confirmClear} disabled={busy}>
+                    <Trash2 size={13} /> {busy ? "Clearing..." : "Confirm clear"}
+                  </button>
+                  <button className="rd-remove-btn" onClick={cancelConfirm} style={{ fontSize: 12.5 }}>Cancel</button>
+                </div>
+                {error && <div style={{ fontSize: 12, color: "var(--danger)" }}>{error}</div>}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+        <History size={15} /> Clear log
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 12.5, color: "var(--text-muted)" }}>
+        Keep entries for
+        <input
+          className="rd-input"
+          style={{ width: 50 }}
+          type="number"
+          value={retentionDraft}
+          onChange={(e) => setRetentionDraft(e.target.value)}
+          onBlur={commitRetention}
+          onKeyDown={(e) => { if (e.key === "Enter") commitRetention(); }}
+        />
+        days
+      </div>
+
+      <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 6 }}>
+        <table className="rd-table">
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left" }}>Cleared</th>
+              <th style={{ textAlign: "left" }}>When</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleLog.length === 0 ? (
+              <tr>
+                <td colSpan={2} style={{ textAlign: "left", color: "var(--text-muted)", fontStyle: "italic" }}>
+                  No clear events recorded in the last {logRetentionDays} day{logRetentionDays === 1 ? "" : "s"}.
+                </td>
+              </tr>
+            ) : (
+              visibleLog.map((entry) => (
+                <tr key={entry.id}>
+                  <td style={{ textAlign: "left" }}>{entry.label}</td>
+                  <td style={{ textAlign: "left", fontFamily: "var(--mono)", fontSize: 12 }}>{new Date(entry.clearedAt).toLocaleString()}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );
