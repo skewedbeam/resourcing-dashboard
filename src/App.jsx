@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff } from "lucide-react";
+import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 // ---------- Design tokens ----------
@@ -70,19 +70,23 @@ const SEED_PROJECTS = [
   { id: "pr2", name: "Intranet Modernisation - Client B", startDate: "2026-03-02", endDate: "2026-06-26" },
 ];
 
-// Sample allocation dates, including a couple deliberately outside their
-// project's window and one left unconfirmed, to demonstrate the alert and
-// the confirm/edit toggle.
+// Each allocation is an array of splits/segments (fractional FTE, time-phased),
+// including a couple deliberately outside their project's window, one left
+// unconfirmed, and one split into multiple segments - to demonstrate the
+// alert, the confirm/edit toggle, and the split feature.
 const SEED_ALLOCATIONS = {
-  "p1|pr1": { pct: 60, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true },
-  "p1|pr2": { pct: 20, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: true },
-  "p2|pr1": { pct: 80, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true },
-  "p3|pr2": { pct: 70, startDate: "2026-03-02", endDate: "2026-07-15", confirmed: true },
-  "p4|pr1": { pct: 40, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true },
-  "p4|pr2": { pct: 30, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: false },
-  "p5|pr1": { pct: 50, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true },
-  "p5|pr2": { pct: 50, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: true },
-  "p6|pr1": { pct: 30, startDate: "2025-12-15", endDate: "2026-08-28", confirmed: true },
+  "p1|pr1": [{ id: "seg1", pct: 60, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true }],
+  "p1|pr2": [{ id: "seg1", pct: 20, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: true }],
+  "p2|pr1": [
+    { id: "seg1", pct: 37.5, startDate: "2026-01-05", endDate: "2026-04-30", confirmed: true },
+    { id: "seg2", pct: 80, startDate: "2026-05-01", endDate: "2026-08-28", confirmed: true },
+  ],
+  "p3|pr2": [{ id: "seg1", pct: 70, startDate: "2026-03-02", endDate: "2026-07-15", confirmed: true }],
+  "p4|pr1": [{ id: "seg1", pct: 40, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true }],
+  "p4|pr2": [{ id: "seg1", pct: 30, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: false }],
+  "p5|pr1": [{ id: "seg1", pct: 50, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true }],
+  "p5|pr2": [{ id: "seg1", pct: 50, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: true }],
+  "p6|pr1": [{ id: "seg1", pct: 30, startDate: "2025-12-15", endDate: "2026-08-28", confirmed: true }],
 };
 
 const SEED_LOCKED_PEOPLE = { p1: true, p2: true };
@@ -180,20 +184,21 @@ function pctColor(pct) {
   return "var(--accent)";
 }
 
-// Allocation entries used to be a bare percentage number; they are now
-// { pct, startDate, endDate }. These helpers read either shape safely.
-function allocPct(entry) {
-  if (typeof entry === "number") return entry;
-  return entry?.pct || 0;
+// An allocation entry is an array of splits/segments, each a fractional FTE
+// over its own date range: { id, pct, startDate, endDate, confirmed }.
+// Older data may still be a bare percentage number or a single object -
+// these helpers normalize any of those shapes into a segment array.
+function toSegments(entry) {
+  if (entry == null) return [];
+  if (Array.isArray(entry)) return entry;
+  if (typeof entry === "number") return entry ? [{ id: "seg1", pct: entry, startDate: "", endDate: "", confirmed: false }] : [];
+  return [{ id: entry.id || "seg1", pct: entry.pct || 0, startDate: entry.startDate || "", endDate: entry.endDate || "", confirmed: !!entry.confirmed }];
 }
-function allocStart(entry) {
-  return typeof entry === "object" && entry ? entry.startDate || "" : "";
+function segmentsTotalPct(entry) {
+  return toSegments(entry).reduce((sum, seg) => sum + (Number(seg.pct) || 0), 0);
 }
-function allocEnd(entry) {
-  return typeof entry === "object" && entry ? entry.endDate || "" : "";
-}
-function allocConfirmed(entry) {
-  return typeof entry === "object" && entry ? !!entry.confirmed : false;
+function fte(pct) {
+  return (Number(pct) / 100).toFixed(2);
 }
 function formatDate(iso) {
   if (!iso) return "";
@@ -210,6 +215,88 @@ function isOutsideWindow(allocStart, allocEnd, projStart, projEnd) {
 function pruneClearLog(log, retentionDays) {
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   return (log || []).filter((entry) => new Date(entry.clearedAt).getTime() >= cutoff);
+}
+
+function csvEscape(value) {
+  const str = String(value ?? "");
+  return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+}
+
+function downloadCSV(filename, rows) {
+  const csv = rows.map((row) => row.map(csvEscape).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function buildSkillsReport(people, skills, skillLevels) {
+  const header = ["Team member", "Role", ...skills.map((s) => s.name)];
+  const rows = people.map((p) => [
+    p.name,
+    p.role,
+    ...skills.map((s) => LEVEL_LABELS[skillLevels[`${p.id}|${s.id}`] || 0]),
+  ]);
+  return [header, ...rows];
+}
+
+function buildAllocationReport(people, projects, allocations) {
+  const header = ["Team member", "Project", "Split #", "Allocation %", "FTE", "Start date", "End date", "Confirmed", "Outside project window"];
+  const rows = [];
+  people.forEach((p) => {
+    projects.forEach((pr) => {
+      const segments = toSegments(allocations[`${p.id}|${pr.id}`]);
+      segments.forEach((seg, idx) => {
+        if (!seg.pct && !seg.startDate && !seg.endDate) return;
+        rows.push([
+          p.name,
+          pr.name,
+          idx + 1,
+          seg.pct,
+          fte(seg.pct),
+          seg.startDate,
+          seg.endDate,
+          seg.confirmed ? "Yes" : "No",
+          isOutsideWindow(seg.startDate, seg.endDate, pr.startDate, pr.endDate) ? "Yes" : "No",
+        ]);
+      });
+    });
+  });
+  return [header, ...rows];
+}
+
+function buildUtilisationReport(people, totalsByPerson) {
+  const header = ["Team member", "Role", "Total allocation %", "Total FTE", "Available %", "Status"];
+  const rows = people.map((p) => {
+    const total = totalsByPerson[p.id] || 0;
+    return [
+      p.name,
+      p.role,
+      total,
+      fte(total),
+      Math.max(0, 100 - total),
+      total > 100 ? "Over-allocated" : total >= 90 ? "Near capacity" : "OK",
+    ];
+  });
+  return [header, ...rows];
+}
+
+function buildConsolidatedReport(people, skills, skillLevels, projects, allocations, totalsByPerson) {
+  return [
+    ["SKILLS REPORT"],
+    ...buildSkillsReport(people, skills, skillLevels),
+    [],
+    ["ALLOCATION REPORT"],
+    ...buildAllocationReport(people, projects, allocations),
+    [],
+    ["UTILISATION REPORT"],
+    ...buildUtilisationReport(people, totalsByPerson),
+  ];
 }
 
 export default function App() {
@@ -265,7 +352,7 @@ export default function App() {
     const totals = {};
     people.forEach((p) => {
       totals[p.id] = projects.reduce(
-        (sum, pr) => sum + allocPct(allocations[`${p.id}|${pr.id}`]),
+        (sum, pr) => sum + segmentsTotalPct(allocations[`${p.id}|${pr.id}`]),
         0
       );
     });
@@ -277,7 +364,7 @@ export default function App() {
       people.map((p) => {
         const row = { name: p.name.replace("Team Member ", "TM"), total: totalsByPerson[p.id] };
         projects.forEach((pr) => {
-          row[pr.name] = allocPct(allocations[`${p.id}|${pr.id}`]);
+          row[pr.name] = segmentsTotalPct(allocations[`${p.id}|${pr.id}`]);
         });
         return row;
       }),
@@ -335,6 +422,9 @@ export default function App() {
           <button className={`rd-sidebar-btn ${tab === "forward" ? "active" : ""}`} onClick={() => setTab("forward")}>
             <TrendingUp size={15} /> Forward capacity
           </button>
+          <button className={`rd-sidebar-btn ${tab === "reports" ? "active" : ""}`} onClick={() => setTab("reports")}>
+            <FileDown size={15} /> Reports
+          </button>
           <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", margin: "10px 0" }} />
           <button className={`rd-sidebar-btn ${tab === "settings" ? "active" : ""}`} onClick={() => setTab("settings")}>
             <Settings size={15} /> Settings
@@ -364,6 +454,7 @@ export default function App() {
               onRemovePerson={(id) => setPeopleData({ people: people.filter((p) => p.id !== id), skills, skillLevels, lockedPeople })}
               onRemoveSkill={(id) => setPeopleData({ people, skills: skills.filter((s) => s.id !== id), skillLevels, lockedPeople })}
               onToggleLock={(personId) => setPeopleData({ people, skills, skillLevels, lockedPeople: { ...lockedPeople, [personId]: !lockedPeople[personId] } })}
+              onUpdatePerson={(id, updates) => setPeopleData({ people: people.map((p) => (p.id === id ? { ...p, ...updates } : p)), skills, skillLevels, lockedPeople })}
             />
           ) : tab === "current" ? (
             <CurrentUtilisation
@@ -388,6 +479,15 @@ export default function App() {
               onAddUpcoming={(proj) => setUpcomingData({ upcoming: [...upcoming, proj] })}
               onRemoveUpcoming={(id) => setUpcomingData({ upcoming: upcoming.filter((u) => u.id !== id) })}
             />
+          ) : tab === "reports" ? (
+            <ReportsPage
+              people={people}
+              skills={skills}
+              skillLevels={skillLevels}
+              projects={projects}
+              allocations={allocations}
+              totalsByPerson={totalsByPerson}
+            />
           ) : (
             <SettingsPage
               people={people}
@@ -407,9 +507,30 @@ export default function App() {
 }
 
 // ---------- Skill matrix ----------
-function SkillMatrix({ people, skills, skillLevels, lockedPeople, onChange, onAddPerson, onAddSkill, onRemovePerson, onRemoveSkill, onToggleLock }) {
-  const [newPerson, setNewPerson] = useState("");
+function SkillMatrix({ people, skills, skillLevels, lockedPeople, onChange, onAddPerson, onAddSkill, onRemovePerson, onRemoveSkill, onToggleLock, onUpdatePerson }) {
+  const [newPersonName, setNewPersonName] = useState("");
+  const [newPersonRole, setNewPersonRole] = useState("");
   const [newSkill, setNewSkill] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editDraft, setEditDraft] = useState({ name: "", role: "" });
+
+  const addPerson = () => {
+    if (!newPersonName.trim()) return;
+    onAddPerson({ id: `p${Date.now()}`, name: newPersonName.trim(), role: newPersonRole.trim() });
+    setNewPersonName("");
+    setNewPersonRole("");
+  };
+
+  const startEdit = (p) => {
+    setEditingId(p.id);
+    setEditDraft({ name: p.name, role: p.role });
+  };
+  const cancelEdit = () => setEditingId(null);
+  const saveEdit = () => {
+    if (!editDraft.name.trim()) return;
+    onUpdatePerson(editingId, { name: editDraft.name.trim(), role: editDraft.role.trim() });
+    setEditingId(null);
+  };
 
   const cycle = (personId, skillId) => {
     if (lockedPeople[personId]) return;
@@ -451,25 +572,53 @@ function SkillMatrix({ people, skills, skillLevels, lockedPeople, onChange, onAd
               return (
                 <tr key={p.id}>
                   <td className="rowhead">
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                      <div>
-                        <div style={{ fontWeight: 600 }}>{p.name}</div>
-                        <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{p.role}</div>
+                    {editingId === p.id ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                        <input
+                          className="rd-text"
+                          value={editDraft.name}
+                          onChange={(e) => setEditDraft((d) => ({ ...d, name: e.target.value }))}
+                          onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") cancelEdit(); }}
+                          style={{ fontSize: 13, padding: "4px 6px" }}
+                          autoFocus
+                        />
+                        <input
+                          className="rd-text"
+                          placeholder="Role"
+                          value={editDraft.role}
+                          onChange={(e) => setEditDraft((d) => ({ ...d, role: e.target.value }))}
+                          onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") cancelEdit(); }}
+                          style={{ fontSize: 12, padding: "4px 6px" }}
+                        />
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <button className="rd-remove-btn" onClick={saveEdit} title="Save"><Save size={13} /></button>
+                          <button className="rd-remove-btn" onClick={cancelEdit} title="Cancel"><XCircle size={13} /></button>
+                        </div>
                       </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        <button
-                          className="rd-remove-btn"
-                          onClick={() => onToggleLock(p.id)}
-                          title={locked ? "Unlock proficiency editing" : "Lock proficiency editing"}
-                          style={{ color: locked ? "var(--warn)" : "var(--text-muted)" }}
-                        >
-                          {locked ? <Lock size={12} /> : <Unlock size={12} />}
-                        </button>
-                        <button className="rd-remove-btn" onClick={() => onRemovePerson(p.id)} title="Remove person">
-                          <X size={12} />
-                        </button>
+                    ) : (
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                        <div>
+                          <div style={{ fontWeight: 600 }}>{p.name}</div>
+                          <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{p.role}</div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <button className="rd-remove-btn" onClick={() => startEdit(p)} title="Edit team member">
+                            <Pencil size={12} />
+                          </button>
+                          <button
+                            className="rd-remove-btn"
+                            onClick={() => onToggleLock(p.id)}
+                            title={locked ? "Unlock proficiency editing" : "Lock proficiency editing"}
+                            style={{ color: locked ? "var(--warn)" : "var(--text-muted)" }}
+                          >
+                            {locked ? <Lock size={12} /> : <Unlock size={12} />}
+                          </button>
+                          <button className="rd-remove-btn" onClick={() => onRemovePerson(p.id)} title="Remove person">
+                            <X size={12} />
+                          </button>
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </td>
                   {skills.map((s) => {
                     const level = skillLevels[`${p.id}|${s.id}`] || 0;
@@ -494,9 +643,15 @@ function SkillMatrix({ people, skills, skillLevels, lockedPeople, onChange, onAd
         </table>
       </div>
 
-      <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
-        <AddRow placeholder="New team member name" value={newPerson} setValue={setNewPerson}
-          onAdd={() => { if (newPerson.trim()) { onAddPerson({ id: `p${Date.now()}`, name: newPerson.trim(), role: "" }); setNewPerson(""); } }} />
+      <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <input className="rd-text" placeholder="New team member name" value={newPersonName}
+          onChange={(e) => setNewPersonName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") addPerson(); }} style={{ minWidth: 180 }} />
+        <input className="rd-text" placeholder="Role" value={newPersonRole}
+          onChange={(e) => setNewPersonRole(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") addPerson(); }} style={{ minWidth: 160 }} />
+        <button className="rd-add-btn" onClick={addPerson}><Plus size={13} /> Add member</button>
+
         <AddRow placeholder="New skill name" value={newSkill} setValue={setNewSkill}
           onAdd={() => { if (newSkill.trim()) { onAddSkill({ id: `s${Date.now()}`, name: newSkill.trim() }); setNewSkill(""); } }} />
       </div>
@@ -510,32 +665,30 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
   const [newProjectStart, setNewProjectStart] = useState("");
   const [newProjectEnd, setNewProjectEnd] = useState("");
 
-  const setPct = (personId, projectId, value) => {
-    const num = Math.max(0, Math.min(999, Number(value) || 0));
+  const setSegmentField = (personId, projectId, segId, field, value) => {
     const key = `${personId}|${projectId}`;
-    const existing = allocations[key];
+    const segments = toSegments(allocations[key]);
+    const exists = segments.some((seg) => seg.id === segId);
+    const nextSegments = exists
+      ? segments.map((seg) =>
+          seg.id === segId ? { ...seg, [field]: value, ...(field === "confirmed" ? {} : { confirmed: false }) } : seg
+        )
+      : [...segments, { id: segId, pct: 0, startDate: "", endDate: "", confirmed: false, [field]: value }];
+    onChangeAllocations({ ...allocations, [key]: nextSegments });
+  };
+
+  const addSegment = (personId, projectId) => {
+    const key = `${personId}|${projectId}`;
+    const segments = toSegments(allocations[key]);
     onChangeAllocations({
       ...allocations,
-      [key]: { pct: num, startDate: allocStart(existing), endDate: allocEnd(existing) },
+      [key]: [...segments, { id: `seg${Date.now()}`, pct: 0, startDate: "", endDate: "", confirmed: false }],
     });
   };
 
-  const setAllocDate = (personId, projectId, field, value) => {
+  const removeSegment = (personId, projectId, segId) => {
     const key = `${personId}|${projectId}`;
-    const existing = allocations[key];
-    onChangeAllocations({
-      ...allocations,
-      [key]: { pct: allocPct(existing), startDate: allocStart(existing), endDate: allocEnd(existing), confirmed: false, [field]: value },
-    });
-  };
-
-  const setConfirmed = (personId, projectId, value) => {
-    const key = `${personId}|${projectId}`;
-    const existing = allocations[key];
-    onChangeAllocations({
-      ...allocations,
-      [key]: { pct: allocPct(existing), startDate: allocStart(existing), endDate: allocEnd(existing), confirmed: value },
-    });
+    onChangeAllocations({ ...allocations, [key]: toSegments(allocations[key]).filter((seg) => seg.id !== segId) });
   };
 
   const addProject = () => {
@@ -551,7 +704,8 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
       <div style={{ marginBottom: 18 }}>
         <div style={{ fontSize: 19, fontWeight: 600 }}>Current utilisation</div>
         <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
-          Allocation percentage and allocated dates per project, per team member. Totals above 100% are flagged.
+          Allocation percentage (with FTE) and dates per project, per team member. Use "Split" to add a second time-phased
+          segment for fractional or ramping allocations. Totals above 100% are flagged.
         </div>
       </div>
 
@@ -589,73 +743,108 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
                   </td>
                   {projects.map((pr) => {
                     const key = `${p.id}|${pr.id}`;
-                    const entry = allocations[key];
-                    const start = allocStart(entry);
-                    const end = allocEnd(entry);
-                    const confirmed = allocConfirmed(entry);
-                    const outOfWindow = isOutsideWindow(start, end, pr.startDate, pr.endDate);
+                    const rawSegments = toSegments(allocations[key]);
+                    const segments = rawSegments.length ? rawSegments : [{ id: "seg1", pct: 0, startDate: "", endDate: "", confirmed: false }];
+                    const cellTotal = segmentsTotalPct(allocations[key]);
                     return (
-                      <td key={pr.id} style={outOfWindow ? { background: "var(--danger-light)" } : undefined}>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
-                          <input
-                            className="rd-input"
-                            type="number"
-                            value={allocPct(entry)}
-                            onChange={(e) => setPct(p.id, pr.id, e.target.value)}
-                          />
-                          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>%</span>
-                        </div>
+                      <td key={pr.id}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 128 }}>
+                          {segments.map((seg, idx) => {
+                            const outOfWindow = isOutsideWindow(seg.startDate, seg.endDate, pr.startDate, pr.endDate);
+                            return (
+                              <div
+                                key={seg.id}
+                                style={{
+                                  paddingBottom: idx < segments.length - 1 ? 6 : 0,
+                                  borderBottom: idx < segments.length - 1 ? "1px dashed var(--border)" : "none",
+                                  background: outOfWindow ? "var(--danger-light)" : undefined,
+                                  borderRadius: outOfWindow ? 4 : undefined,
+                                }}
+                              >
+                                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
+                                  <input
+                                    className="rd-input"
+                                    type="number"
+                                    step="0.1"
+                                    value={seg.pct}
+                                    onChange={(e) => setSegmentField(p.id, pr.id, seg.id, "pct", Math.max(0, Math.min(999, Number(e.target.value) || 0)))}
+                                  />
+                                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>%</span>
+                                  {rawSegments.length > 1 && (
+                                    <button className="rd-remove-btn" onClick={() => removeSegment(p.id, pr.id, seg.id)} title="Remove this split">
+                                      <X size={10} />
+                                    </button>
+                                  )}
+                                </div>
+                                <div style={{ fontSize: 9.5, color: "var(--text-muted)" }}>{fte(seg.pct)} FTE</div>
 
-                        {confirmed ? (
-                          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, marginTop: 4 }}>
-                            <span style={{ fontSize: 10.5, color: "var(--text-muted)" }}>
-                              {formatDate(start)} &rarr; {formatDate(end)}
-                            </span>
-                            <button
-                              className="rd-remove-btn"
-                              onClick={() => setConfirmed(p.id, pr.id, false)}
-                              title="Edit allocation dates"
-                            >
-                              <Pencil size={11} />
-                            </button>
-                          </div>
-                        ) : (
-                          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, marginTop: 4, flexWrap: "wrap" }}>
-                            <input
-                              className="rd-date"
-                              type="date"
-                              title="Allocation start date"
-                              value={start}
-                              onChange={(e) => setAllocDate(p.id, pr.id, "startDate", e.target.value)}
-                            />
-                            <span style={{ fontSize: 10, color: "var(--text-muted)" }}>&rarr;</span>
-                            <input
-                              className="rd-date"
-                              type="date"
-                              title="Allocation end date"
-                              value={end}
-                              onChange={(e) => setAllocDate(p.id, pr.id, "endDate", e.target.value)}
-                            />
-                            <button
-                              className="rd-remove-btn"
-                              onClick={() => start && end && setConfirmed(p.id, pr.id, true)}
-                              title={start && end ? "Confirm allocation dates" : "Set both dates to confirm"}
-                              disabled={!start || !end}
-                              style={{ color: start && end ? "var(--accent)" : "var(--border)", cursor: start && end ? "pointer" : "not-allowed" }}
-                            >
-                              <Check size={12} />
-                            </button>
-                          </div>
-                        )}
+                                {seg.confirmed ? (
+                                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, marginTop: 3 }}>
+                                    <span style={{ fontSize: 10.5, color: "var(--text-muted)" }}>
+                                      {formatDate(seg.startDate)} &rarr; {formatDate(seg.endDate)}
+                                    </span>
+                                    <button
+                                      className="rd-remove-btn"
+                                      onClick={() => setSegmentField(p.id, pr.id, seg.id, "confirmed", false)}
+                                      title="Edit split dates"
+                                    >
+                                      <Pencil size={11} />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, marginTop: 3, flexWrap: "wrap" }}>
+                                    <input
+                                      className="rd-date"
+                                      type="date"
+                                      title="Split start date"
+                                      value={seg.startDate}
+                                      onChange={(e) => setSegmentField(p.id, pr.id, seg.id, "startDate", e.target.value)}
+                                    />
+                                    <span style={{ fontSize: 10, color: "var(--text-muted)" }}>&rarr;</span>
+                                    <input
+                                      className="rd-date"
+                                      type="date"
+                                      title="Split end date"
+                                      value={seg.endDate}
+                                      onChange={(e) => setSegmentField(p.id, pr.id, seg.id, "endDate", e.target.value)}
+                                    />
+                                    <button
+                                      className="rd-remove-btn"
+                                      onClick={() => seg.startDate && seg.endDate && setSegmentField(p.id, pr.id, seg.id, "confirmed", true)}
+                                      title={seg.startDate && seg.endDate ? "Confirm split dates" : "Set both dates to confirm"}
+                                      disabled={!seg.startDate || !seg.endDate}
+                                      style={{ color: seg.startDate && seg.endDate ? "var(--accent)" : "var(--border)", cursor: seg.startDate && seg.endDate ? "pointer" : "not-allowed" }}
+                                    >
+                                      <Check size={12} />
+                                    </button>
+                                  </div>
+                                )}
 
-                        {outOfWindow && (
-                          <div
-                            style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, marginTop: 3, color: "var(--danger)", fontSize: 10 }}
-                            title="Allocation dates fall outside the project's duration"
+                                {outOfWindow && (
+                                  <div
+                                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, marginTop: 3, color: "var(--danger)", fontSize: 10 }}
+                                    title="Split dates fall outside the project's duration"
+                                  >
+                                    <AlertTriangle size={11} /> Outside window
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+
+                          <button
+                            className="rd-remove-btn"
+                            onClick={() => addSegment(p.id, pr.id)}
+                            title="Add another split for this person on this project"
+                            style={{ fontSize: 10.5, display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}
                           >
-                            <AlertTriangle size={11} /> Outside project window
-                          </div>
-                        )}
+                            <Plus size={10} /> Split
+                          </button>
+
+                          {segments.length > 1 && (
+                            <div style={{ fontSize: 10, fontWeight: 600, color: pctColor(cellTotal) }}>Total {cellTotal}%</div>
+                          )}
+                        </div>
                       </td>
                     );
                   })}
@@ -823,6 +1012,71 @@ function ForwardCapacity({ people, skills, skillLevels, upcoming, capacityData, 
           }}
         >
           <Plus size={13} /> Add project
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Reports ----------
+function ReportsPage({ people, skills, skillLevels, projects, allocations, totalsByPerson }) {
+  const stamp = new Date().toISOString().slice(0, 10);
+
+  const cards = [
+    {
+      key: "skills",
+      label: "Skills report",
+      detail: `Proficiency levels for ${people.length} team members across ${skills.length} skills`,
+      onDownload: () => downloadCSV(`skills-report-${stamp}.csv`, buildSkillsReport(people, skills, skillLevels)),
+    },
+    {
+      key: "allocation",
+      label: "Allocation report",
+      detail: `${projects.length} projects · every allocation split with %, FTE and dates`,
+      onDownload: () => downloadCSV(`allocation-report-${stamp}.csv`, buildAllocationReport(people, projects, allocations)),
+    },
+    {
+      key: "utilisation",
+      label: "Utilisation report",
+      detail: `Total allocation and available capacity per team member`,
+      onDownload: () => downloadCSV(`utilisation-report-${stamp}.csv`, buildUtilisationReport(people, totalsByPerson)),
+    },
+  ];
+
+  return (
+    <div>
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 19, fontWeight: 600 }}>Reports</div>
+        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
+          Download data as CSV, individually or all at once.
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 22 }}>
+        {cards.map((c) => (
+          <div key={c.key} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{c.label}</div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{c.detail}</div>
+            </div>
+            <button className="rd-add-btn" onClick={c.onDownload}>
+              <FileDown size={13} /> Download CSV
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ background: "var(--accent-light)", border: "1px solid var(--accent)", borderRadius: 6, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--accent)" }}>Consolidated report</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>All three reports combined into a single CSV file, in labelled sections.</div>
+        </div>
+        <button
+          className="rd-add-btn"
+          style={{ color: "var(--accent)", borderColor: "var(--accent)" }}
+          onClick={() => downloadCSV(`resourcing-consolidated-report-${stamp}.csv`, buildConsolidatedReport(people, skills, skillLevels, projects, allocations, totalsByPerson))}
+        >
+          <FileDown size={13} /> Download consolidated CSV
         </button>
       </div>
     </div>
