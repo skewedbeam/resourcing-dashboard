@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText, ThumbsUp, ThumbsDown, GanttChart, Briefcase, KeyRound, LayoutDashboard, Users, Gauge, UploadCloud, LogOut } from "lucide-react";
+import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText, ThumbsUp, ThumbsDown, GanttChart, Briefcase, KeyRound, LayoutDashboard, Users, Gauge, UploadCloud, LogOut, BookOpen } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -718,6 +718,9 @@ export default function App() {
           <button className={`rd-sidebar-btn ${tab === "reports" ? "active" : ""}`} onClick={() => setTab("reports")}>
             <FileDown size={15} /> Reports
           </button>
+          <button className={`rd-sidebar-btn ${tab === "manual" ? "active" : ""}`} onClick={() => setTab("manual")}>
+            <BookOpen size={15} /> User manual
+          </button>
           <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", margin: "10px 0" }} />
           <button className={`rd-sidebar-btn ${tab === "settings" ? "active" : ""}`} onClick={() => setTab("settings")}>
             <Settings size={15} /> Settings
@@ -824,6 +827,8 @@ export default function App() {
               proposedTotalsByPerson={proposedTotalsByPerson}
               onExportBackup={exportAllData}
             />
+          ) : tab === "manual" ? (
+            <UserManual />
           ) : (
             <fieldset disabled={!editUnlocked} style={FIELDSET_RESET}>
               <SettingsPage
@@ -895,11 +900,19 @@ function Dashboard({ people, skills, skillLevels, projects, allocations, upcomin
 
   return (
     <div>
-      <div style={{ marginBottom: 18 }}>
-        <div style={{ fontSize: 19, fontWeight: 600 }}>Dashboard</div>
-        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
-          A ready reckoner of resourcing across the team, current projects and the pipeline.
+      <div style={{ marginBottom: 18, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 19, fontWeight: 600 }}>Dashboard</div>
+          <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
+            A ready reckoner of resourcing across the team, current projects and the pipeline.
+          </div>
         </div>
+        <button
+          onClick={() => onNavigate("manual")}
+          style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--accent)", background: "var(--accent-light)", border: "1px solid var(--accent)", borderRadius: 5, padding: "7px 12px", cursor: "pointer", fontFamily: "var(--sans)", flexShrink: 0 }}
+        >
+          <BookOpen size={13} /> User manual
+        </button>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 26 }}>
@@ -2321,6 +2334,208 @@ function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, cl
             )}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+// ---------- User manual ----------
+const MANUAL_SECTIONS = [
+  {
+    id: "access",
+    title: "Signing in & access levels",
+    body: (
+      <>
+        <p>
+          Everything in this app - including just viewing it - sits behind the team's shared login
+          (email + password, created for you by whoever set the app up). There's no public sign-up page.
+        </p>
+        <p>
+          Once signed in, the app opens in <strong>view-only mode</strong>: you can see every page, but
+          buttons and fields are disabled. To make changes, unlock editing with the separate edit password
+          at the bottom of the sidebar. That's a lighter, second gate on top of login - it exists so people
+          can browse safely without accidentally changing a cell, and it resets per browser (you'll need to
+          re-enter it on a new device). Reports, Timeline and this manual are always readable without
+          unlocking editing, since they don't change anything.
+        </p>
+        <p>Use "Log out" in the sidebar to end your session.</p>
+      </>
+    ),
+  },
+  {
+    id: "dashboard",
+    title: "Dashboard",
+    body: (
+      <>
+        <p>The landing page - a ready reckoner of where things stand:</p>
+        <ul>
+          <li>Stat cards for team size, active projects, average utilisation, anyone over-committed,
+            spare bench capacity (in FTE), pipeline projects, and proposed splits awaiting a decision.
+            Click any card to jump to the page it's about.</li>
+          <li>A team allocation table (current % and status per person) and a projects overview table
+            (headcount, total %, FTE per project).</li>
+          <li>A pipeline &amp; skill gaps panel - flags any upcoming project that needs a skill nobody
+            on the team currently holds at Advanced level or higher.</li>
+        </ul>
+      </>
+    ),
+  },
+  {
+    id: "projects",
+    title: "Projects",
+    body: (
+      <>
+        <p>
+          The master list of active projects/programs. Add, edit or remove a project here - name,
+          start/end dates, and the skills it requires (used for the skill-gap check and the Forward
+          Capacity ranking). Current Utilisation only manages who's allocated to projects already on
+          this list; it doesn't add or remove projects itself.
+        </p>
+      </>
+    ),
+  },
+  {
+    id: "skills",
+    title: "Skill matrix",
+    body: (
+      <>
+        <p>
+          One row per team member, one column per skill. Click a cell to cycle its proficiency: None,
+          Basic, Working, Advanced, Expert.
+        </p>
+        <ul>
+          <li>Add or remove team members and skills from the controls under the table.</li>
+          <li>Edit a person's name/role with the pencil icon next to their name.</li>
+          <li>Lock a row (the lock icon) to stop its proficiency levels from being changed - handy once
+            someone's levels are agreed and shouldn't shift accidentally.</li>
+        </ul>
+      </>
+    ),
+  },
+  {
+    id: "current",
+    title: "Current utilisation",
+    body: (
+      <>
+        <p>
+          Who's allocated to what, as a percentage (with the FTE equivalent shown underneath). Every
+          person/project cell can hold more than one time-phased <strong>split</strong> - use "Split" to
+          add another segment, each with its own %, date range and status.
+        </p>
+        <ul>
+          <li><strong>Current vs proposed</strong> - a split is either "Current" (committed) or
+            "Proposed" (a draft change being compared against what's committed). A proposed split shows
+            Accept (promotes it to current) / Reject (discards it) buttons. A current split can be sent
+            back to "Proposed" with its own toggle. The per-person and per-project totals, and the
+            "Pending proposals" stat, all key off this.</li>
+          <li><strong>Dates</strong> - set a split's start/end date, then confirm it (checkmark) to lock
+            it to read-only text with an edit (pencil) toggle to reopen it. If a confirmed split's dates
+            fall outside its project's own duration, it's highlighted with an "Outside window" warning.</li>
+          <li>The table footer totals current and proposed FTE per project; the chart below totals
+            allocation per person, stacked by project.</li>
+        </ul>
+      </>
+    ),
+  },
+  {
+    id: "forward",
+    title: "Forward capacity",
+    body: (
+      <>
+        <p>
+          Shows free capacity today (100% minus current allocation) per person, and for each upcoming
+          project in the pipeline, the top three suggested people - ranked by a weighted score of 70%
+          average proficiency on the project's required skills and 30% free capacity. Add an upcoming
+          project with its required skills using the form at the bottom; remove one with the X.
+        </p>
+      </>
+    ),
+  },
+  {
+    id: "timeline",
+    title: "Timeline",
+    body: (
+      <>
+        <p>
+          A Gantt-style view of every dated allocation split, grouped by project or by person (toggle at
+          the top). Solid bars are current splits, dashed amber bars are proposed, and a bar outlined in
+          red means that split falls outside its project's duration. A vertical line marks today.
+        </p>
+      </>
+    ),
+  },
+  {
+    id: "reports",
+    title: "Reports & backup",
+    body: (
+      <>
+        <p>
+          Download-ready summaries: a skills/proficiency report, an allocation-by-project report
+          (grouped by project, ordered by period, current vs proposed), and a per-resource utilisation
+          report - each as CSV or PDF, or all three combined into one consolidated file. The live tables
+          above them mirror the same data on-screen.
+        </p>
+        <p>
+          Separately, <strong>"Export JSON backup"</strong> at the bottom of this page downloads every
+          underlying record - team, skills, proficiency, projects, allocations, pipeline, settings - as
+          one file. Unlike the CSV/PDF reports, this is round-trippable: it's the file you'd use to
+          restore the app's full state (see Settings below), not just read.
+        </p>
+      </>
+    ),
+  },
+  {
+    id: "settings",
+    title: "Settings",
+    body: (
+      <>
+        <p>
+          Two destructive actions live here, both password-gated (the same edit-adjacent "clear data"
+          password) so they can't happen by accident:
+        </p>
+        <ul>
+          <li><strong>Clear data</strong> - wipe the skill matrix, current utilisation, forward capacity,
+            or everything, immediately and for everyone. Every clear is recorded in the log below with a
+            timestamp, kept for a configurable number of days.</li>
+          <li><strong>Restore from backup</strong> - upload a JSON file from Reports &rarr;
+            "Export JSON backup" to replace all of the above with that file's contents. You'll see a
+            preview (file name, team/project counts) before confirming.</li>
+        </ul>
+      </>
+    ),
+  },
+];
+
+function UserManual() {
+  return (
+    <div>
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 19, fontWeight: 600 }}>User manual</div>
+        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
+          What each page does and how the pieces fit together.
+        </div>
+      </div>
+
+      <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "14px 16px", marginBottom: 20 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 8 }}>
+          On this page
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {MANUAL_SECTIONS.map((s) => (
+            <a key={s.id} href={`#manual-${s.id}`} className="rd-tag" style={{ textDecoration: "none" }}>
+              {s.title}
+            </a>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {MANUAL_SECTIONS.map((s) => (
+          <div key={s.id} id={`manual-${s.id}`} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "16px 18px", scrollMarginTop: 20 }}>
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>{s.title}</div>
+            <div style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.6 }}>{s.body}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
