@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText } from "lucide-react";
+import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText, ThumbsUp, ThumbsDown, GanttChart } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -596,6 +596,9 @@ export default function App() {
           <button className={`rd-sidebar-btn ${tab === "forward" ? "active" : ""}`} onClick={() => setTab("forward")}>
             <TrendingUp size={15} /> Forward capacity
           </button>
+          <button className={`rd-sidebar-btn ${tab === "timeline" ? "active" : ""}`} onClick={() => setTab("timeline")}>
+            <GanttChart size={15} /> Timeline
+          </button>
           <button className={`rd-sidebar-btn ${tab === "reports" ? "active" : ""}`} onClick={() => setTab("reports")}>
             <FileDown size={15} /> Reports
           </button>
@@ -654,6 +657,8 @@ export default function App() {
               onAddUpcoming={(proj) => setUpcomingData({ upcoming: [...upcoming, proj] })}
               onRemoveUpcoming={(id) => setUpcomingData({ upcoming: upcoming.filter((u) => u.id !== id) })}
             />
+          ) : tab === "timeline" ? (
+            <TimelinePage people={people} projects={projects} allocations={allocations} />
           ) : tab === "reports" ? (
             <ReportsPage
               people={people}
@@ -881,6 +886,10 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, pro
   const totalProposedFte = people.reduce((sum, p) => sum + (proposedTotalsByPerson[p.id] || 0) / 100, 0);
   const avgUtilisation = people.length ? people.reduce((sum, p) => sum + (totalsByPerson[p.id] || 0), 0) / people.length : 0;
   const overAllocatedCount = people.filter((p) => (totalsByPerson[p.id] || 0) > 100).length;
+  const pendingProposals = people.reduce(
+    (sum, p) => sum + projects.reduce((s2, pr) => s2 + toSegments(allocations[`${p.id}|${pr.id}`]).filter((seg) => (seg.status || "current") === "proposed").length, 0),
+    0
+  );
 
   return (
     <div>
@@ -906,6 +915,12 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, pro
           value={overAllocatedCount}
           sub={overAllocatedCount === 1 ? "person above 100%" : "people above 100%"}
           color={overAllocatedCount > 0 ? "var(--danger)" : "var(--accent)"}
+        />
+        <StatCard
+          label="Pending proposals"
+          value={pendingProposals}
+          sub="splits awaiting accept/reject"
+          color={pendingProposals > 0 ? "var(--warn)" : "var(--text)"}
         />
       </div>
 
@@ -963,24 +978,34 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, pro
                                   borderRadius: outOfWindow ? 4 : undefined,
                                 }}
                               >
-                                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 3 }}>
-                                  <button
-                                    onClick={() => setSegmentField(p.id, pr.id, seg.id, "status", (seg.status || "current") === "current" ? "proposed" : "current")}
-                                    title="Toggle current / proposed"
-                                    style={{
-                                      fontSize: 9,
-                                      fontWeight: 600,
-                                      padding: "1px 7px",
-                                      borderRadius: 8,
-                                      cursor: "pointer",
-                                      border: `1px solid ${(seg.status || "current") === "proposed" ? "var(--warn)" : "var(--accent)"}`,
-                                      color: (seg.status || "current") === "proposed" ? "var(--warn)" : "var(--accent)",
-                                      background: (seg.status || "current") === "proposed" ? "var(--warn-light)" : "var(--accent-light)",
-                                    }}
-                                  >
-                                    {(seg.status || "current") === "proposed" ? "Proposed" : "Current"}
-                                  </button>
-                                </div>
+                                {(seg.status || "current") === "proposed" ? (
+                                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, marginBottom: 3 }}>
+                                    <button
+                                      onClick={() => setSegmentField(p.id, pr.id, seg.id, "status", "current")}
+                                      title="Accept proposal - make this the current allocation"
+                                      style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 8, cursor: "pointer", border: "1px solid var(--accent)", color: "var(--accent)", background: "var(--accent-light)" }}
+                                    >
+                                      <ThumbsUp size={9} /> Accept
+                                    </button>
+                                    <button
+                                      onClick={() => removeSegment(p.id, pr.id, seg.id)}
+                                      title="Reject proposal - discard this split"
+                                      style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 8, cursor: "pointer", border: "1px solid var(--danger)", color: "var(--danger)", background: "var(--danger-light)" }}
+                                    >
+                                      <ThumbsDown size={9} /> Reject
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 3 }}>
+                                    <button
+                                      onClick={() => setSegmentField(p.id, pr.id, seg.id, "status", "proposed")}
+                                      title="Revert to proposed"
+                                      style={{ fontSize: 9, fontWeight: 600, padding: "1px 7px", borderRadius: 8, cursor: "pointer", border: "1px solid var(--accent)", color: "var(--accent)", background: "var(--accent-light)" }}
+                                    >
+                                      Current
+                                    </button>
+                                  </div>
+                                )}
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
                                   <input
                                     className="rd-input"
@@ -990,7 +1015,7 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, pro
                                     onChange={(e) => setSegmentField(p.id, pr.id, seg.id, "pct", Math.max(0, Math.min(999, Number(e.target.value) || 0)))}
                                   />
                                   <span style={{ fontSize: 11, color: "var(--text-muted)" }}>%</span>
-                                  {rawSegments.length > 1 && (
+                                  {rawSegments.length > 1 && (seg.status || "current") !== "proposed" && (
                                     <button className="rd-remove-btn" onClick={() => removeSegment(p.id, pr.id, seg.id)} title="Remove this split">
                                       <X size={10} />
                                     </button>
@@ -1257,6 +1282,191 @@ function ForwardCapacity({ people, skills, skillLevels, upcoming, capacityData, 
         >
           <Plus size={13} /> Add project
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Timeline ----------
+function TimelinePage({ people, projects, allocations }) {
+  const [groupBy, setGroupBy] = useState("project");
+
+  const allDates = [];
+  projects.forEach((pr) => {
+    if (pr.startDate) allDates.push(pr.startDate);
+    if (pr.endDate) allDates.push(pr.endDate);
+  });
+  people.forEach((p) => {
+    projects.forEach((pr) => {
+      toSegments(allocations[`${p.id}|${pr.id}`]).forEach((seg) => {
+        if (seg.startDate) allDates.push(seg.startDate);
+        if (seg.endDate) allDates.push(seg.endDate);
+      });
+    });
+  });
+
+  if (!allDates.length) {
+    return (
+      <div>
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 19, fontWeight: 600 }}>Timeline</div>
+          <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
+            A visual view of allocations across time, by project or by person.
+          </div>
+        </div>
+        <div style={{ color: "var(--text-muted)", fontSize: 13 }}>
+          No dated projects or allocations yet - add dates in Current Utilisation to see them here.
+        </div>
+      </div>
+    );
+  }
+
+  const sortedDates = [...allDates].sort();
+  const minDate = new Date(`${sortedDates[0]}T00:00:00`);
+  const maxDate = new Date(`${sortedDates[sortedDates.length - 1]}T00:00:00`);
+  minDate.setDate(minDate.getDate() - 3);
+  maxDate.setDate(maxDate.getDate() + 3);
+  const baseMs = minDate.getTime();
+  const totalDays = Math.max(1, (maxDate.getTime() - baseMs) / 86400000);
+
+  const pctFor = (iso) => {
+    const d = new Date(`${iso}T00:00:00`).getTime();
+    return Math.max(0, Math.min(100, ((d - baseMs) / 86400000 / totalDays) * 100));
+  };
+
+  const months = [];
+  let cursor = new Date(minDate.getFullYear(), minDate.getMonth(), 1);
+  while (cursor <= maxDate) {
+    months.push({
+      label: cursor.toLocaleDateString("en-GB", { month: "short", year: "numeric" }),
+      pct: pctFor(cursor.toISOString().slice(0, 10)),
+    });
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+  }
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayPct = todayIso >= sortedDates[0] && todayIso <= sortedDates[sortedDates.length - 1] ? pctFor(todayIso) : null;
+
+  const groups =
+    groupBy === "project"
+      ? projects
+          .map((pr) => ({
+            key: pr.id,
+            heading: pr.name,
+            band: pr.startDate && pr.endDate ? { start: pr.startDate, end: pr.endDate } : null,
+            bars: people.flatMap((p) =>
+              toSegments(allocations[`${p.id}|${pr.id}`])
+                .filter((seg) => seg.startDate && seg.endDate)
+                .map((seg) => ({ label: p.name, seg, outOfWindow: isOutsideWindow(seg.startDate, seg.endDate, pr.startDate, pr.endDate) }))
+            ),
+          }))
+          .filter((g) => g.bars.length || g.band)
+      : people
+          .map((p) => ({
+            key: p.id,
+            heading: p.name,
+            band: null,
+            bars: projects.flatMap((pr) =>
+              toSegments(allocations[`${p.id}|${pr.id}`])
+                .filter((seg) => seg.startDate && seg.endDate)
+                .map((seg) => ({ label: pr.name, seg, outOfWindow: isOutsideWindow(seg.startDate, seg.endDate, pr.startDate, pr.endDate) }))
+            ),
+          }))
+          .filter((g) => g.bars.length);
+
+  return (
+    <div>
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 19, fontWeight: 600 }}>Timeline</div>
+        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
+          A visual view of allocations across time. Solid bars are current, dashed amber bars are proposed. A red outline
+          means the split falls outside its project's duration.
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <button
+          className="rd-add-btn"
+          style={groupBy === "project" ? { background: "var(--accent-light)", borderStyle: "solid" } : undefined}
+          onClick={() => setGroupBy("project")}
+        >
+          By project
+        </button>
+        <button
+          className="rd-add-btn"
+          style={groupBy === "person" ? { background: "var(--accent-light)", borderStyle: "solid" } : undefined}
+          onClick={() => setGroupBy("person")}
+        >
+          By person
+        </button>
+      </div>
+
+      <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 6, background: "var(--panel)" }}>
+        <div style={{ minWidth: 900 }}>
+          <div style={{ display: "flex" }}>
+            <div style={{ width: 160, flexShrink: 0, borderBottom: "1px solid var(--border)" }} />
+            <div style={{ flex: 1, position: "relative", height: 28, borderBottom: "1px solid var(--border)" }}>
+              {months.map((m, i) => (
+                <div
+                  key={i}
+                  style={{ position: "absolute", left: `${m.pct}%`, top: 0, bottom: 0, borderLeft: "1px solid var(--border)", fontSize: 10, color: "var(--text-muted)", paddingLeft: 4, whiteSpace: "nowrap" }}
+                >
+                  {m.label}
+                </div>
+              ))}
+              {todayPct != null && (
+                <div style={{ position: "absolute", left: `${todayPct}%`, top: 0, bottom: 0, borderLeft: "1px solid var(--danger)", fontSize: 10, color: "var(--danger)", paddingLeft: 4, whiteSpace: "nowrap" }}>
+                  Today
+                </div>
+              )}
+            </div>
+          </div>
+
+          {groups.map((g) => (
+            <div key={g.key} style={{ display: "flex", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ width: 160, flexShrink: 0, padding: "8px 10px", fontSize: 12, fontWeight: 600 }}>{g.heading}</div>
+              <div style={{ flex: 1, position: "relative", minHeight: Math.max(34, 10 + g.bars.length * 22), padding: "6px 0" }}>
+                {g.band && (
+                  <div
+                    style={{ position: "absolute", left: `${pctFor(g.band.start)}%`, width: `${Math.max(0.5, pctFor(g.band.end) - pctFor(g.band.start))}%`, top: 0, bottom: 0, background: "var(--accent-light)", opacity: 0.5 }}
+                    title={`Project duration: ${formatDate(g.band.start)} - ${formatDate(g.band.end)}`}
+                  />
+                )}
+                {g.bars.map((b, i) => {
+                  const left = pctFor(b.seg.startDate);
+                  const width = Math.max(0.6, pctFor(b.seg.endDate) - left);
+                  const proposed = (b.seg.status || "current") === "proposed";
+                  return (
+                    <div
+                      key={`${b.label}-${b.seg.id}-${i}`}
+                      title={`${b.label}: ${b.seg.pct}% (${fte(b.seg.pct)} FTE) · ${formatDate(b.seg.startDate)} - ${formatDate(b.seg.endDate)}${proposed ? " · proposed" : ""}${b.outOfWindow ? " · outside project window" : ""}`}
+                      style={{
+                        position: "absolute",
+                        left: `${left}%`,
+                        width: `${width}%`,
+                        top: 4 + i * 22,
+                        height: 16,
+                        borderRadius: 3,
+                        background: proposed ? "var(--warn-light)" : "var(--accent)",
+                        border: proposed ? "1px dashed var(--warn)" : b.outOfWindow ? "1px solid var(--danger)" : "none",
+                        color: proposed ? "var(--warn)" : "#fff",
+                        fontSize: 9,
+                        lineHeight: "16px",
+                        paddingLeft: 4,
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        boxSizing: "border-box",
+                      }}
+                    >
+                      {b.label}
+                    </div>
+                  );
+                })}
+                {g.bars.length === 0 && <div style={{ height: 20 }} />}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
