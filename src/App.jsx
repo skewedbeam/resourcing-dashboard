@@ -10,8 +10,10 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle } from "lucide-react";
+import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText } from "lucide-react";
 import { supabase } from "./supabaseClient";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
 
 // ---------- Design tokens ----------
 const TOKENS = `
@@ -245,26 +247,46 @@ function buildSkillsReport(people, skills, skillLevels) {
   return [header, ...rows];
 }
 
-function buildAllocationReport(people, projects, allocations) {
-  const header = ["Team member", "Project", "Split #", "Allocation %", "FTE", "Start date", "End date", "Confirmed", "Outside project window"];
-  const rows = [];
-  people.forEach((p) => {
-    projects.forEach((pr) => {
-      const segments = toSegments(allocations[`${p.id}|${pr.id}`]);
-      segments.forEach((seg, idx) => {
+// Groups every allocation split by project, ordered by period (start date),
+// for a "allocation by period per project" view rather than a flat dump.
+function buildAllocationByProject(projects, people, allocations) {
+  return projects.map((pr) => {
+    const rows = [];
+    people.forEach((p) => {
+      toSegments(allocations[`${p.id}|${pr.id}`]).forEach((seg) => {
         if (!seg.pct && !seg.startDate && !seg.endDate) return;
-        rows.push([
-          p.name,
-          pr.name,
-          idx + 1,
-          seg.pct,
-          fte(seg.pct),
-          seg.startDate,
-          seg.endDate,
-          seg.confirmed ? "Yes" : "No",
-          isOutsideWindow(seg.startDate, seg.endDate, pr.startDate, pr.endDate) ? "Yes" : "No",
-        ]);
+        rows.push({
+          person: p.name,
+          pct: seg.pct,
+          fteVal: fte(seg.pct),
+          start: seg.startDate,
+          end: seg.endDate,
+          confirmed: seg.confirmed,
+          outOfWindow: isOutsideWindow(seg.startDate, seg.endDate, pr.startDate, pr.endDate),
+        });
       });
+    });
+    rows.sort((a, b) => (a.start || "9999-99-99").localeCompare(b.start || "9999-99-99"));
+    return { project: pr, rows };
+  });
+}
+
+function buildAllocationCSV(groupedByProject) {
+  const header = ["Project", "Project duration", "Resource", "Allocation %", "FTE", "Start", "End", "Confirmed", "Outside project window"];
+  const rows = [];
+  groupedByProject.forEach(({ project, rows: segRows }) => {
+    segRows.forEach((r) => {
+      rows.push([
+        project.name,
+        `${formatDate(project.startDate) || "?"} - ${formatDate(project.endDate) || "?"}`,
+        r.person,
+        r.pct,
+        r.fteVal,
+        r.start,
+        r.end,
+        r.confirmed ? "Yes" : "No",
+        r.outOfWindow ? "Yes" : "No",
+      ]);
     });
   });
   return [header, ...rows];
@@ -291,12 +313,121 @@ function buildConsolidatedReport(people, skills, skillLevels, projects, allocati
     ["SKILLS REPORT"],
     ...buildSkillsReport(people, skills, skillLevels),
     [],
-    ["ALLOCATION REPORT"],
-    ...buildAllocationReport(people, projects, allocations),
+    ["ALLOCATION BY PROJECT REPORT"],
+    ...buildAllocationCSV(buildAllocationByProject(projects, people, allocations)),
     [],
     ["UTILISATION REPORT"],
     ...buildUtilisationReport(people, totalsByPerson),
   ];
+}
+
+// ---------- PDF report builders ----------
+function newReportDoc(title) {
+  const doc = new jsPDF({ unit: "pt" });
+  doc.setFontSize(16);
+  doc.setTextColor(28, 36, 48);
+  doc.text(title, 40, 40);
+  doc.setFontSize(9);
+  doc.setTextColor(120, 120, 120);
+  doc.text(`Generated ${new Date().toLocaleString()}`, 40, 56);
+  doc.setTextColor(0, 0, 0);
+  return doc;
+}
+
+function addTableSection(doc, startY, heading, subheading, head, body) {
+  let y = startY;
+  doc.setFontSize(12);
+  doc.setTextColor(0, 0, 0);
+  doc.text(heading, 40, y);
+  y += 14;
+  if (subheading) {
+    doc.setFontSize(9);
+    doc.setTextColor(120, 120, 120);
+    doc.text(subheading, 40, y);
+    doc.setTextColor(0, 0, 0);
+    y += 12;
+  }
+  autoTable(doc, {
+    startY: y,
+    head: [head],
+    body,
+    margin: { left: 40, right: 40 },
+    styles: { fontSize: 8, cellPadding: 4 },
+    headStyles: { fillColor: [46, 111, 110] },
+    theme: "grid",
+  });
+  return doc.lastAutoTable.finalY + 22;
+}
+
+function buildSkillsPDF(people, skills, skillLevels) {
+  const doc = newReportDoc("Skills Report");
+  const head = ["Team member", "Role", ...skills.map((s) => s.name)];
+  const body = people.map((p) => [p.name, p.role, ...skills.map((s) => LEVEL_LABELS[skillLevels[`${p.id}|${s.id}`] || 0])]);
+  addTableSection(doc, 76, "Proficiency by team member", null, head, body);
+  return doc;
+}
+
+function addAllocationSections(doc, startY, projects, people, allocations) {
+  let y = startY;
+  const grouped = buildAllocationByProject(projects, people, allocations);
+  grouped.forEach(({ project, rows }) => {
+    if (!rows.length) return;
+    if (y > 680) {
+      doc.addPage();
+      y = 40;
+    }
+    const head = ["Resource", "Allocation %", "FTE", "Start", "End", "Confirmed", "Outside window"];
+    const body = rows.map((r) => [r.person, r.pct, r.fteVal, formatDate(r.start) || "-", formatDate(r.end) || "-", r.confirmed ? "Yes" : "No", r.outOfWindow ? "Yes" : "No"]);
+    y = addTableSection(doc, y, project.name, `${formatDate(project.startDate) || "?"} - ${formatDate(project.endDate) || "?"}`, head, body);
+  });
+  return y;
+}
+
+function buildAllocationPDF(projects, people, allocations) {
+  const doc = newReportDoc("Allocation by Project");
+  addAllocationSections(doc, 76, projects, people, allocations);
+  return doc;
+}
+
+function buildUtilisationPDF(people, totalsByPerson) {
+  const doc = newReportDoc("Utilisation by Resource");
+  const head = ["Team member", "Role", "Total %", "FTE", "Available %", "Status"];
+  const body = people.map((p) => {
+    const total = totalsByPerson[p.id] || 0;
+    return [p.name, p.role, total, fte(total), Math.max(0, 100 - total), total > 100 ? "Over-allocated" : total >= 90 ? "Near capacity" : "OK"];
+  });
+  addTableSection(doc, 76, "Current allocation & utilisation", null, head, body);
+  return doc;
+}
+
+function buildConsolidatedPDF(people, skills, skillLevels, projects, allocations, totalsByPerson) {
+  const doc = newReportDoc("Resourcing Consolidated Report");
+  addTableSection(
+    doc,
+    76,
+    "Skills",
+    null,
+    ["Team member", "Role", ...skills.map((s) => s.name)],
+    people.map((p) => [p.name, p.role, ...skills.map((s) => LEVEL_LABELS[skillLevels[`${p.id}|${s.id}`] || 0])])
+  );
+
+  doc.addPage();
+  doc.setFontSize(14);
+  doc.setTextColor(0, 0, 0);
+  doc.text("Allocation by Project", 40, 40);
+  addAllocationSections(doc, 66, projects, people, allocations);
+
+  doc.addPage();
+  doc.setFontSize(14);
+  doc.text("Utilisation by Resource", 40, 40);
+  const uHead = ["Team member", "Role", "Total %", "FTE", "Available %", "Status"];
+  const uBody = people.map((p) => {
+    const total = totalsByPerson[p.id] || 0;
+    return [p.name, p.role, total, fte(total), Math.max(0, 100 - total), total > 100 ? "Over-allocated" : total >= 90 ? "Near capacity" : "OK"];
+  });
+  addTableSection(doc, 66, "Current allocation & utilisation", null, uHead, uBody);
+
+  return doc;
 }
 
 export default function App() {
@@ -699,6 +830,10 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
     setNewProjectEnd("");
   };
 
+  const totalAllocatedFte = people.reduce((sum, p) => sum + (totalsByPerson[p.id] || 0) / 100, 0);
+  const avgUtilisation = people.length ? people.reduce((sum, p) => sum + (totalsByPerson[p.id] || 0), 0) / people.length : 0;
+  const overAllocatedCount = people.filter((p) => (totalsByPerson[p.id] || 0) > 100).length;
+
   return (
     <div>
       <div style={{ marginBottom: 18 }}>
@@ -707,6 +842,17 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
           Allocation percentage (with FTE) and dates per project, per team member. Use "Split" to add a second time-phased
           segment for fractional or ramping allocations. Totals above 100% are flagged.
         </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 18 }}>
+        <StatCard label="Total allocated FTE" value={totalAllocatedFte.toFixed(2)} sub={`across ${people.length} team members`} />
+        <StatCard label="Average utilisation" value={`${avgUtilisation.toFixed(0)}%`} color={pctColor(avgUtilisation)} />
+        <StatCard
+          label="Over-allocated"
+          value={overAllocatedCount}
+          sub={overAllocatedCount === 1 ? "person above 100%" : "people above 100%"}
+          color={overAllocatedCount > 0 ? "var(--danger)" : "var(--accent)"}
+        />
       </div>
 
       <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 6, marginBottom: 22 }}>
@@ -1022,24 +1168,33 @@ function ForwardCapacity({ people, skills, skillLevels, upcoming, capacityData, 
 function ReportsPage({ people, skills, skillLevels, projects, allocations, totalsByPerson }) {
   const stamp = new Date().toISOString().slice(0, 10);
 
+  const avgProficiency = people.length && skills.length
+    ? people.reduce((sum, p) => sum + skills.reduce((s2, sk) => s2 + (skillLevels[`${p.id}|${sk.id}`] || 0), 0), 0) / (people.length * skills.length)
+    : 0;
+  const totalAllocatedFte = people.reduce((sum, p) => sum + (totalsByPerson[p.id] || 0) / 100, 0);
+  const avgUtilisation = people.length ? people.reduce((sum, p) => sum + (totalsByPerson[p.id] || 0), 0) / people.length : 0;
+
   const cards = [
     {
       key: "skills",
       label: "Skills report",
       detail: `Proficiency levels for ${people.length} team members across ${skills.length} skills`,
-      onDownload: () => downloadCSV(`skills-report-${stamp}.csv`, buildSkillsReport(people, skills, skillLevels)),
+      onDownloadCSV: () => downloadCSV(`skills-report-${stamp}.csv`, buildSkillsReport(people, skills, skillLevels)),
+      onDownloadPDF: () => buildSkillsPDF(people, skills, skillLevels).save(`skills-report-${stamp}.pdf`),
     },
     {
       key: "allocation",
-      label: "Allocation report",
-      detail: `${projects.length} projects · every allocation split with %, FTE and dates`,
-      onDownload: () => downloadCSV(`allocation-report-${stamp}.csv`, buildAllocationReport(people, projects, allocations)),
+      label: "Allocation by project",
+      detail: `${projects.length} projects · resources grouped per project, ordered by period`,
+      onDownloadCSV: () => downloadCSV(`allocation-by-project-${stamp}.csv`, buildAllocationCSV(buildAllocationByProject(projects, people, allocations))),
+      onDownloadPDF: () => buildAllocationPDF(projects, people, allocations).save(`allocation-by-project-${stamp}.pdf`),
     },
     {
       key: "utilisation",
-      label: "Utilisation report",
-      detail: `Total allocation and available capacity per team member`,
-      onDownload: () => downloadCSV(`utilisation-report-${stamp}.csv`, buildUtilisationReport(people, totalsByPerson)),
+      label: "Utilisation per resource",
+      detail: `Current FTE allocation and utilisation per team member`,
+      onDownloadCSV: () => downloadCSV(`utilisation-report-${stamp}.csv`, buildUtilisationReport(people, totalsByPerson)),
+      onDownloadPDF: () => buildUtilisationPDF(people, totalsByPerson).save(`utilisation-report-${stamp}.pdf`),
     },
   ];
 
@@ -1048,10 +1203,52 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
       <div style={{ marginBottom: 18 }}>
         <div style={{ fontSize: 19, fontWeight: 600 }}>Reports</div>
         <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
-          Download data as CSV, individually or all at once.
+          Concise skills, allocation-by-project and per-resource utilisation reports - as CSV or PDF, individually or consolidated.
         </div>
       </div>
 
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <StatCard label="Team members" value={people.length} />
+        <StatCard label="Skills tracked" value={skills.length} />
+        <StatCard label="Active projects" value={projects.length} />
+        <StatCard label="Avg proficiency" value={`${avgProficiency.toFixed(1)}/4`} />
+      </div>
+
+      <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>Current FTE allocation &amp; utilisation, live</div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
+        <StatCard label="Total allocated FTE" value={totalAllocatedFte.toFixed(2)} />
+        <StatCard label="Average utilisation" value={`${avgUtilisation.toFixed(0)}%`} color={pctColor(avgUtilisation)} />
+      </div>
+
+      <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 6, marginBottom: 26 }}>
+        <table className="rd-table">
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left" }}>Team member</th>
+              <th style={{ textAlign: "left" }}>Role</th>
+              <th>Current FTE</th>
+              <th>Utilisation</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {people.map((p) => {
+              const total = totalsByPerson[p.id] || 0;
+              return (
+                <tr key={p.id}>
+                  <td style={{ textAlign: "left", fontWeight: 600 }}>{p.name}</td>
+                  <td style={{ textAlign: "left", color: "var(--text-muted)" }}>{p.role}</td>
+                  <td style={{ fontFamily: "var(--mono)" }}>{fte(total)}</td>
+                  <td style={{ fontFamily: "var(--mono)", fontWeight: 700, color: pctColor(total) }}>{total}%</td>
+                  <td>{total > 100 ? "Over-allocated" : total >= 90 ? "Near capacity" : "OK"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>Downloadable reports</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 22 }}>
         {cards.map((c) => (
           <div key={c.key} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -1059,9 +1256,14 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
               <div style={{ fontWeight: 600, fontSize: 13.5 }}>{c.label}</div>
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{c.detail}</div>
             </div>
-            <button className="rd-add-btn" onClick={c.onDownload}>
-              <FileDown size={13} /> Download CSV
-            </button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="rd-add-btn" onClick={c.onDownloadCSV}>
+                <FileDown size={13} /> CSV
+              </button>
+              <button className="rd-add-btn" onClick={c.onDownloadPDF}>
+                <FileText size={13} /> PDF
+              </button>
+            </div>
           </div>
         ))}
       </div>
@@ -1069,15 +1271,24 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
       <div style={{ background: "var(--accent-light)", border: "1px solid var(--accent)", borderRadius: 6, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <div>
           <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--accent)" }}>Consolidated report</div>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>All three reports combined into a single CSV file, in labelled sections.</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>All three reports combined into one file, in labelled sections.</div>
         </div>
-        <button
-          className="rd-add-btn"
-          style={{ color: "var(--accent)", borderColor: "var(--accent)" }}
-          onClick={() => downloadCSV(`resourcing-consolidated-report-${stamp}.csv`, buildConsolidatedReport(people, skills, skillLevels, projects, allocations, totalsByPerson))}
-        >
-          <FileDown size={13} /> Download consolidated CSV
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            className="rd-add-btn"
+            style={{ color: "var(--accent)", borderColor: "var(--accent)" }}
+            onClick={() => downloadCSV(`resourcing-consolidated-report-${stamp}.csv`, buildConsolidatedReport(people, skills, skillLevels, projects, allocations, totalsByPerson))}
+          >
+            <FileDown size={13} /> Consolidated CSV
+          </button>
+          <button
+            className="rd-add-btn"
+            style={{ color: "var(--accent)", borderColor: "var(--accent)" }}
+            onClick={() => buildConsolidatedPDF(people, skills, skillLevels, projects, allocations, totalsByPerson).save(`resourcing-consolidated-report-${stamp}.pdf`)}
+          >
+            <FileText size={13} /> Consolidated PDF
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -1243,6 +1454,16 @@ function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, cl
 }
 
 // ---------- Shared small components ----------
+function StatCard({ label, value, sub, color }) {
+  return (
+    <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "12px 16px", minWidth: 140, flex: "1 1 140px" }}>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</div>
+      <div style={{ fontSize: 20, fontWeight: 700, color: color || "var(--text)", marginTop: 4 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
 function AddRow({ placeholder, value, setValue, onAdd }) {
   return (
     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
