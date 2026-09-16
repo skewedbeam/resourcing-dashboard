@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText, ThumbsUp, ThumbsDown, GanttChart } from "lucide-react";
+import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText, ThumbsUp, ThumbsDown, GanttChart, Briefcase, KeyRound } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -68,8 +68,8 @@ const SEED_SKILL_LEVELS = {
 };
 
 const SEED_PROJECTS = [
-  { id: "pr1", name: "Core Banking Migration - Client A", startDate: "2026-01-05", endDate: "2026-08-28" },
-  { id: "pr2", name: "Intranet Modernisation - Client B", startDate: "2026-03-02", endDate: "2026-06-26" },
+  { id: "pr1", name: "Core Banking Migration - Client A", startDate: "2026-01-05", endDate: "2026-08-28", requiredSkillIds: ["s1", "s3", "s4"] },
+  { id: "pr2", name: "Intranet Modernisation - Client B", startDate: "2026-03-02", endDate: "2026-06-26", requiredSkillIds: ["s2"] },
 ];
 
 // Each allocation is an array of splits/segments (fractional FTE, time-phased),
@@ -99,9 +99,11 @@ const SEED_LOCKED_PEOPLE = { p1: true, p2: true };
 
 const SEED_APP_SETTINGS = { logRetentionDays: 30, clearLog: [] };
 
-// Client-side gate only (this app has no login/backend) - prevents accidental
-// clicks, not a real access control. Set VITE_CLEAR_DATA_PASSWORD to override.
+// Client-side gates only (this app has no login/backend) - deter accidental
+// changes, not real access control. Set these to override the defaults.
 const CLEAR_DATA_PASSWORD = import.meta.env.VITE_CLEAR_DATA_PASSWORD || "clear-data";
+const EDIT_PASSWORD = import.meta.env.VITE_EDIT_PASSWORD || "edit-access";
+const EDIT_UNLOCKED_KEY = "rd-edit-unlocked";
 
 const SEED_UPCOMING = [
   { id: "u1", name: "Data Warehouse Build - Prospect C", requiredSkillIds: ["s5", "s3"], note: "Kickoff expected next quarter" },
@@ -109,6 +111,11 @@ const SEED_UPCOMING = [
 ];
 
 const LEVEL_LABELS = ["None", "Basic", "Working", "Advanced", "Expert"];
+
+// Wrapping a tab's content in <fieldset disabled> is a one-line way to make
+// every nested button/input inert in view-only mode, without threading a
+// disabled prop through each component.
+const FIELDSET_RESET = { border: "none", margin: 0, padding: 0, minWidth: 0 };
 
 // ---------- Shared, realtime-synced state backed by Supabase ----------
 // Table expected: resourcing_data (key text primary key, value jsonb not null, updated_at timestamptz)
@@ -461,6 +468,28 @@ function buildConsolidatedPDF(people, skills, skillLevels, projects, allocations
 
 export default function App() {
   const [tab, setTab] = useState("skills");
+  const [editUnlocked, setEditUnlocked] = useState(() => {
+    try {
+      return localStorage.getItem(EDIT_UNLOCKED_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  const unlockEdit = (password) => {
+    if (password !== EDIT_PASSWORD) return false;
+    setEditUnlocked(true);
+    try {
+      localStorage.setItem(EDIT_UNLOCKED_KEY, "true");
+    } catch {}
+    return true;
+  };
+  const lockEdit = () => {
+    setEditUnlocked(false);
+    try {
+      localStorage.removeItem(EDIT_UNLOCKED_KEY);
+    } catch {}
+  };
 
   const [peopleData, setPeopleData, peopleLoaded, peopleError] = useSupabaseState(
     "people-skills",
@@ -587,6 +616,9 @@ export default function App() {
             <div style={{ color: "#fff", fontSize: 15, fontWeight: 600, letterSpacing: 0.2 }}>Resourcing</div>
             <div style={{ color: "var(--sidebar-text)", fontSize: 11.5, marginTop: 2 }}>Skills & allocation</div>
           </div>
+          <button className={`rd-sidebar-btn ${tab === "projects" ? "active" : ""}`} onClick={() => setTab("projects")}>
+            <Briefcase size={15} /> Projects
+          </button>
           <button className={`rd-sidebar-btn ${tab === "skills" ? "active" : ""}`} onClick={() => setTab("skills")}>
             <Grid3x3 size={15} /> Skill matrix
           </button>
@@ -606,8 +638,11 @@ export default function App() {
           <button className={`rd-sidebar-btn ${tab === "settings" ? "active" : ""}`} onClick={() => setTab("settings")}>
             <Settings size={15} /> Settings
           </button>
-          <div style={{ marginTop: "auto", padding: "14px 16px", fontSize: 10.5, color: "rgba(255,255,255,0.35)", lineHeight: 1.5 }}>
-            Live shared data. Anyone with this URL can view and edit, there is no login.
+          <div style={{ marginTop: "auto", padding: "14px 16px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+            <EditAccessControl editUnlocked={editUnlocked} onUnlock={unlockEdit} onLock={lockEdit} />
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", lineHeight: 1.5, marginTop: 8 }}>
+              Live shared data. No login - the edit password only deters accidental changes.
+            </div>
           </div>
         </div>
 
@@ -619,44 +654,58 @@ export default function App() {
           )}
           {!loaded ? (
             <div style={{ color: "var(--text-muted)", fontSize: 13 }}>Loading...</div>
+          ) : tab === "projects" ? (
+            <fieldset disabled={!editUnlocked} style={FIELDSET_RESET}>
+              <ProjectsPage
+                projects={projects}
+                skills={skills}
+                onAddProject={(project) => setAllocData({ projects: [...projects, project], allocations })}
+                onUpdateProject={(id, updates) => setAllocData({ projects: projects.map((p) => (p.id === id ? { ...p, ...updates } : p)), allocations })}
+                onRemoveProject={(id) => setAllocData({ projects: projects.filter((p) => p.id !== id), allocations })}
+              />
+            </fieldset>
           ) : tab === "skills" ? (
-            <SkillMatrix
-              people={people}
-              skills={skills}
-              skillLevels={skillLevels}
-              lockedPeople={lockedPeople}
-              onChange={(next) => setPeopleData({ people, skills, skillLevels: next, lockedPeople })}
-              onAddPerson={(person) => setPeopleData({ people: [...people, person], skills, skillLevels, lockedPeople })}
-              onAddSkill={(skill) => setPeopleData({ people, skills: [...skills, skill], skillLevels, lockedPeople })}
-              onRemovePerson={(id) => setPeopleData({ people: people.filter((p) => p.id !== id), skills, skillLevels, lockedPeople })}
-              onRemoveSkill={(id) => setPeopleData({ people, skills: skills.filter((s) => s.id !== id), skillLevels, lockedPeople })}
-              onToggleLock={(personId) => setPeopleData({ people, skills, skillLevels, lockedPeople: { ...lockedPeople, [personId]: !lockedPeople[personId] } })}
-              onUpdatePerson={(id, updates) => setPeopleData({ people: people.map((p) => (p.id === id ? { ...p, ...updates } : p)), skills, skillLevels, lockedPeople })}
-            />
+            <fieldset disabled={!editUnlocked} style={FIELDSET_RESET}>
+              <SkillMatrix
+                people={people}
+                skills={skills}
+                skillLevels={skillLevels}
+                lockedPeople={lockedPeople}
+                onChange={(next) => setPeopleData({ people, skills, skillLevels: next, lockedPeople })}
+                onAddPerson={(person) => setPeopleData({ people: [...people, person], skills, skillLevels, lockedPeople })}
+                onAddSkill={(skill) => setPeopleData({ people, skills: [...skills, skill], skillLevels, lockedPeople })}
+                onRemovePerson={(id) => setPeopleData({ people: people.filter((p) => p.id !== id), skills, skillLevels, lockedPeople })}
+                onRemoveSkill={(id) => setPeopleData({ people, skills: skills.filter((s) => s.id !== id), skillLevels, lockedPeople })}
+                onToggleLock={(personId) => setPeopleData({ people, skills, skillLevels, lockedPeople: { ...lockedPeople, [personId]: !lockedPeople[personId] } })}
+                onUpdatePerson={(id, updates) => setPeopleData({ people: people.map((p) => (p.id === id ? { ...p, ...updates } : p)), skills, skillLevels, lockedPeople })}
+              />
+            </fieldset>
           ) : tab === "current" ? (
-            <CurrentUtilisation
-              people={people}
-              projects={projects}
-              allocations={allocations}
-              totalsByPerson={totalsByPerson}
-              proposedTotalsByPerson={proposedTotalsByPerson}
-              chartData={chartData}
-              projectColors={projectColors}
-              onChangeAllocations={(next) => setAllocData({ projects, allocations: next })}
-              onAddProject={(project) => setAllocData({ projects: [...projects, project], allocations })}
-              onRemoveProject={(id) => setAllocData({ projects: projects.filter((p) => p.id !== id), allocations })}
-            />
+            <fieldset disabled={!editUnlocked} style={FIELDSET_RESET}>
+              <CurrentUtilisation
+                people={people}
+                projects={projects}
+                allocations={allocations}
+                totalsByPerson={totalsByPerson}
+                proposedTotalsByPerson={proposedTotalsByPerson}
+                chartData={chartData}
+                projectColors={projectColors}
+                onChangeAllocations={(next) => setAllocData({ projects, allocations: next })}
+              />
+            </fieldset>
           ) : tab === "forward" ? (
-            <ForwardCapacity
-              people={people}
-              skills={skills}
-              skillLevels={skillLevels}
-              upcoming={upcoming}
-              capacityData={capacityData}
-              totalsByPerson={totalsByPerson}
-              onAddUpcoming={(proj) => setUpcomingData({ upcoming: [...upcoming, proj] })}
-              onRemoveUpcoming={(id) => setUpcomingData({ upcoming: upcoming.filter((u) => u.id !== id) })}
-            />
+            <fieldset disabled={!editUnlocked} style={FIELDSET_RESET}>
+              <ForwardCapacity
+                people={people}
+                skills={skills}
+                skillLevels={skillLevels}
+                upcoming={upcoming}
+                capacityData={capacityData}
+                totalsByPerson={totalsByPerson}
+                onAddUpcoming={(proj) => setUpcomingData({ upcoming: [...upcoming, proj] })}
+                onRemoveUpcoming={(id) => setUpcomingData({ upcoming: upcoming.filter((u) => u.id !== id) })}
+              />
+            </fieldset>
           ) : tab === "timeline" ? (
             <TimelinePage people={people} projects={projects} allocations={allocations} />
           ) : tab === "reports" ? (
@@ -670,18 +719,159 @@ export default function App() {
               proposedTotalsByPerson={proposedTotalsByPerson}
             />
           ) : (
-            <SettingsPage
-              people={people}
-              skills={skills}
-              projects={projects}
-              upcoming={upcoming}
-              logRetentionDays={logRetentionDays}
-              clearLog={clearLog}
-              onClearScope={clearScope}
-              onSetRetentionDays={(days) => setAppSettingsData({ logRetentionDays: days, clearLog })}
-            />
+            <fieldset disabled={!editUnlocked} style={FIELDSET_RESET}>
+              <SettingsPage
+                people={people}
+                skills={skills}
+                projects={projects}
+                upcoming={upcoming}
+                logRetentionDays={logRetentionDays}
+                clearLog={clearLog}
+                onClearScope={clearScope}
+                onSetRetentionDays={(days) => setAppSettingsData({ logRetentionDays: days, clearLog })}
+              />
+            </fieldset>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Projects ----------
+function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemoveProject }) {
+  const [editingId, setEditingId] = useState(null);
+  const [draft, setDraft] = useState({ name: "", startDate: "", endDate: "", requiredSkillIds: [] });
+
+  const [newName, setNewName] = useState("");
+  const [newStart, setNewStart] = useState("");
+  const [newEnd, setNewEnd] = useState("");
+  const [newSkillIds, setNewSkillIds] = useState([]);
+
+  const startEdit = (pr) => {
+    setEditingId(pr.id);
+    setDraft({ name: pr.name, startDate: pr.startDate || "", endDate: pr.endDate || "", requiredSkillIds: pr.requiredSkillIds || [] });
+  };
+  const cancelEdit = () => setEditingId(null);
+  const saveEdit = () => {
+    if (!draft.name.trim()) return;
+    onUpdateProject(editingId, { name: draft.name.trim(), startDate: draft.startDate, endDate: draft.endDate, requiredSkillIds: draft.requiredSkillIds });
+    setEditingId(null);
+  };
+  const toggleDraftSkill = (id) =>
+    setDraft((d) => ({ ...d, requiredSkillIds: d.requiredSkillIds.includes(id) ? d.requiredSkillIds.filter((x) => x !== id) : [...d.requiredSkillIds, id] }));
+
+  const toggleNewSkill = (id) => setNewSkillIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  const addProject = () => {
+    if (!newName.trim()) return;
+    onAddProject({ id: `pr${Date.now()}`, name: newName.trim(), startDate: newStart, endDate: newEnd, requiredSkillIds: newSkillIds });
+    setNewName("");
+    setNewStart("");
+    setNewEnd("");
+    setNewSkillIds([]);
+  };
+
+  return (
+    <div>
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 19, fontWeight: 600 }}>Projects</div>
+        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
+          Master list of projects/programs: name, duration and required skills. Add, edit and remove projects here -
+          Current Utilisation only manages who's allocated to them.
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 22 }}>
+        {projects.map((pr) => (
+          <div key={pr.id} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "14px 16px" }}>
+            {editingId === pr.id ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <input className="rd-text" value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} style={{ minWidth: 220, flex: 1 }} autoFocus />
+                  <input className="rd-text" type="date" title="Start date" value={draft.startDate} onChange={(e) => setDraft((d) => ({ ...d, startDate: e.target.value }))} />
+                  <span style={{ fontSize: 12, color: "var(--text-muted)", alignSelf: "center" }}>to</span>
+                  <input className="rd-text" type="date" title="End date" value={draft.endDate} onChange={(e) => setDraft((d) => ({ ...d, endDate: e.target.value }))} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 6 }}>Required skills</div>
+                  {skills.map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => toggleDraftSkill(s.id)}
+                      className="rd-tag"
+                      style={{
+                        border: "1px solid var(--border)",
+                        cursor: "pointer",
+                        background: draft.requiredSkillIds.includes(s.id) ? "var(--accent)" : "var(--accent-light)",
+                        color: draft.requiredSkillIds.includes(s.id) ? "#fff" : "var(--accent)",
+                      }}
+                    >
+                      {s.name}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button className="rd-add-btn" onClick={saveEdit}><Save size={13} /> Save</button>
+                  <button className="rd-remove-btn" onClick={cancelEdit} style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 4 }}><XCircle size={13} /> Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 14.5 }}>{pr.name}</div>
+                  {(pr.startDate || pr.endDate) && (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
+                      {formatDate(pr.startDate) || "?"} &ndash; {formatDate(pr.endDate) || "?"}
+                    </div>
+                  )}
+                  <div style={{ marginTop: 8 }}>
+                    {(pr.requiredSkillIds || []).length === 0 ? (
+                      <span style={{ fontSize: 11.5, color: "var(--text-muted)", fontStyle: "italic" }}>No required skills set</span>
+                    ) : (
+                      pr.requiredSkillIds.map((sid) => {
+                        const skill = skills.find((s) => s.id === sid);
+                        return skill ? <span key={sid} className="rd-tag">{skill.name}</span> : null;
+                      })
+                    )}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <button className="rd-remove-btn" onClick={() => startEdit(pr)} title="Edit project"><Pencil size={13} /></button>
+                  <button className="rd-remove-btn" onClick={() => onRemoveProject(pr.id)} title="Remove project"><X size={14} /></button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "16px 18px" }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Add project</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          <input className="rd-text" placeholder="Project name" value={newName} onChange={(e) => setNewName(e.target.value)} style={{ minWidth: 220, flex: 1 }} />
+          <input className="rd-text" type="date" title="Start date" value={newStart} onChange={(e) => setNewStart(e.target.value)} />
+          <span style={{ fontSize: 12, color: "var(--text-muted)", alignSelf: "center" }}>to</span>
+          <input className="rd-text" type="date" title="End date" value={newEnd} onChange={(e) => setNewEnd(e.target.value)} />
+        </div>
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 6 }}>Required skills</div>
+          {skills.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => toggleNewSkill(s.id)}
+              className="rd-tag"
+              style={{
+                border: "1px solid var(--border)",
+                cursor: "pointer",
+                background: newSkillIds.includes(s.id) ? "var(--accent)" : "var(--accent-light)",
+                color: newSkillIds.includes(s.id) ? "#fff" : "var(--accent)",
+              }}
+            >
+              {s.name}
+            </button>
+          ))}
+        </div>
+        <button className="rd-add-btn" onClick={addProject}><Plus size={13} /> Add project</button>
       </div>
     </div>
   );
@@ -841,11 +1031,7 @@ function SkillMatrix({ people, skills, skillLevels, lockedPeople, onChange, onAd
 }
 
 // ---------- Current utilisation ----------
-function CurrentUtilisation({ people, projects, allocations, totalsByPerson, proposedTotalsByPerson, chartData, projectColors, onChangeAllocations, onAddProject, onRemoveProject }) {
-  const [newProject, setNewProject] = useState("");
-  const [newProjectStart, setNewProjectStart] = useState("");
-  const [newProjectEnd, setNewProjectEnd] = useState("");
-
+function CurrentUtilisation({ people, projects, allocations, totalsByPerson, proposedTotalsByPerson, chartData, projectColors, onChangeAllocations }) {
   const RESETS_CONFIRM = new Set(["pct", "startDate", "endDate"]);
 
   const setSegmentField = (personId, projectId, segId, field, value) => {
@@ -874,14 +1060,6 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, pro
     onChangeAllocations({ ...allocations, [key]: toSegments(allocations[key]).filter((seg) => seg.id !== segId) });
   };
 
-  const addProject = () => {
-    if (!newProject.trim()) return;
-    onAddProject({ id: `pr${Date.now()}`, name: newProject.trim(), startDate: newProjectStart, endDate: newProjectEnd });
-    setNewProject("");
-    setNewProjectStart("");
-    setNewProjectEnd("");
-  };
-
   const totalAllocatedFte = people.reduce((sum, p) => sum + (totalsByPerson[p.id] || 0) / 100, 0);
   const totalProposedFte = people.reduce((sum, p) => sum + (proposedTotalsByPerson[p.id] || 0) / 100, 0);
   const avgUtilisation = people.length ? people.reduce((sum, p) => sum + (totalsByPerson[p.id] || 0), 0) / people.length : 0;
@@ -897,7 +1075,8 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, pro
         <div style={{ fontSize: 19, fontWeight: 600 }}>Current utilisation</div>
         <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
           Allocation percentage (with FTE) and dates per project, per team member. Use "Split" to add a second time-phased
-          segment for fractional or ramping allocations. Totals above 100% are flagged.
+          segment for fractional or ramping allocations. Totals above 100% are flagged. Manage the project list itself
+          (name, duration, required skills) on the Projects page.
         </div>
       </div>
 
@@ -931,12 +1110,7 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, pro
               <th className="corner">Team member</th>
               {projects.map((pr) => (
                 <th key={pr.id}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>
-                    <span>{pr.name}</span>
-                    <button className="rd-remove-btn" onClick={() => onRemoveProject(pr.id)} title="Remove project">
-                      <X size={11} />
-                    </button>
-                  </div>
+                  <div>{pr.name}</div>
                   {(pr.startDate || pr.endDate) && (
                     <div style={{ fontSize: 10.5, fontWeight: 400, color: "var(--text-muted)", marginTop: 3 }}>
                       {formatDate(pr.startDate) || "?"} &ndash; {formatDate(pr.endDate) || "?"}
@@ -1125,21 +1299,6 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, pro
             </tr>
           </tfoot>
         </table>
-      </div>
-
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <input
-          className="rd-text"
-          placeholder="New project name"
-          value={newProject}
-          onChange={(e) => setNewProject(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") addProject(); }}
-          style={{ minWidth: 200 }}
-        />
-        <input className="rd-text" type="date" title="Project start date" value={newProjectStart} onChange={(e) => setNewProjectStart(e.target.value)} />
-        <span style={{ fontSize: 12, color: "var(--text-muted)" }}>to</span>
-        <input className="rd-text" type="date" title="Project end date" value={newProjectEnd} onChange={(e) => setNewProjectEnd(e.target.value)} />
-        <button className="rd-add-btn" onClick={addProject}><Plus size={13} /> Add</button>
       </div>
 
       <div style={{ marginTop: 26, background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "18px 20px" }}>
@@ -1774,6 +1933,63 @@ function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, cl
 }
 
 // ---------- Shared small components ----------
+function EditAccessControl({ editUnlocked, onUnlock, onLock }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  const tryUnlock = () => {
+    if (onUnlock(password)) {
+      setPassword("");
+      setError("");
+    } else {
+      setError("Incorrect password.");
+    }
+  };
+
+  if (editUnlocked) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--sidebar-accent)", fontWeight: 600 }}>
+          <Unlock size={13} /> Edit mode
+        </div>
+        <button
+          onClick={onLock}
+          title="Switch to view-only"
+          style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--sidebar-text)", background: "none", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 4, padding: "3px 7px", cursor: "pointer" }}
+        >
+          <Lock size={11} /> Lock
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--sidebar-text)", fontWeight: 600, marginBottom: 6 }}>
+        <Lock size={13} /> View only
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <input
+          type="password"
+          placeholder="Edit password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") tryUnlock(); }}
+          style={{ flex: 1, minWidth: 0, fontSize: 11.5, padding: "5px 7px", borderRadius: 4, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.05)", color: "#fff" }}
+        />
+        <button
+          onClick={tryUnlock}
+          title="Unlock editing"
+          style={{ display: "flex", alignItems: "center", color: "var(--sidebar-accent)", background: "none", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 4, padding: "0 8px", cursor: "pointer" }}
+        >
+          <KeyRound size={13} />
+        </button>
+      </div>
+      {error && <div style={{ fontSize: 10.5, color: "#E08A73", marginTop: 4 }}>{error}</div>}
+    </div>
+  );
+}
+
 function StatCard({ label, value, sub, color }) {
   return (
     <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "12px 16px", minWidth: 140, flex: "1 1 140px" }}>
