@@ -74,21 +74,25 @@ const SEED_PROJECTS = [
 
 // Each allocation is an array of splits/segments (fractional FTE, time-phased),
 // including a couple deliberately outside their project's window, one left
-// unconfirmed, and one split into multiple segments - to demonstrate the
-// alert, the confirm/edit toggle, and the split feature.
+// unconfirmed, one split into multiple segments, and one with a "proposed"
+// segment alongside its "current" one - to demonstrate the alert, the
+// confirm/edit toggle, the split feature, and the current/proposed compare.
 const SEED_ALLOCATIONS = {
-  "p1|pr1": [{ id: "seg1", pct: 60, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true }],
-  "p1|pr2": [{ id: "seg1", pct: 20, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: true }],
-  "p2|pr1": [
-    { id: "seg1", pct: 37.5, startDate: "2026-01-05", endDate: "2026-04-30", confirmed: true },
-    { id: "seg2", pct: 80, startDate: "2026-05-01", endDate: "2026-08-28", confirmed: true },
+  "p1|pr1": [{ id: "seg1", pct: 60, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true, status: "current" }],
+  "p1|pr2": [
+    { id: "seg1", pct: 20, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: true, status: "current" },
+    { id: "seg2", pct: 40, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: false, status: "proposed" },
   ],
-  "p3|pr2": [{ id: "seg1", pct: 70, startDate: "2026-03-02", endDate: "2026-07-15", confirmed: true }],
-  "p4|pr1": [{ id: "seg1", pct: 40, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true }],
-  "p4|pr2": [{ id: "seg1", pct: 30, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: false }],
-  "p5|pr1": [{ id: "seg1", pct: 50, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true }],
-  "p5|pr2": [{ id: "seg1", pct: 50, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: true }],
-  "p6|pr1": [{ id: "seg1", pct: 30, startDate: "2025-12-15", endDate: "2026-08-28", confirmed: true }],
+  "p2|pr1": [
+    { id: "seg1", pct: 37.5, startDate: "2026-01-05", endDate: "2026-04-30", confirmed: true, status: "current" },
+    { id: "seg2", pct: 80, startDate: "2026-05-01", endDate: "2026-08-28", confirmed: true, status: "current" },
+  ],
+  "p3|pr2": [{ id: "seg1", pct: 70, startDate: "2026-03-02", endDate: "2026-07-15", confirmed: true, status: "current" }],
+  "p4|pr1": [{ id: "seg1", pct: 40, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true, status: "current" }],
+  "p4|pr2": [{ id: "seg1", pct: 30, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: false, status: "current" }],
+  "p5|pr1": [{ id: "seg1", pct: 50, startDate: "2026-01-05", endDate: "2026-08-28", confirmed: true, status: "current" }],
+  "p5|pr2": [{ id: "seg1", pct: 50, startDate: "2026-03-02", endDate: "2026-06-26", confirmed: true, status: "current" }],
+  "p6|pr1": [{ id: "seg1", pct: 30, startDate: "2025-12-15", endDate: "2026-08-28", confirmed: true, status: "current" }],
 };
 
 const SEED_LOCKED_PEOPLE = { p1: true, p2: true };
@@ -187,17 +191,21 @@ function pctColor(pct) {
 }
 
 // An allocation entry is an array of splits/segments, each a fractional FTE
-// over its own date range: { id, pct, startDate, endDate, confirmed }.
+// over its own date range: { id, pct, startDate, endDate, confirmed, status }.
+// status is "current" (committed) or "proposed" (a draft change being
+// compared against what's committed) - defaults to "current" for legacy data.
 // Older data may still be a bare percentage number or a single object -
 // these helpers normalize any of those shapes into a segment array.
 function toSegments(entry) {
   if (entry == null) return [];
   if (Array.isArray(entry)) return entry;
-  if (typeof entry === "number") return entry ? [{ id: "seg1", pct: entry, startDate: "", endDate: "", confirmed: false }] : [];
-  return [{ id: entry.id || "seg1", pct: entry.pct || 0, startDate: entry.startDate || "", endDate: entry.endDate || "", confirmed: !!entry.confirmed }];
+  if (typeof entry === "number") return entry ? [{ id: "seg1", pct: entry, startDate: "", endDate: "", confirmed: false, status: "current" }] : [];
+  return [{ id: entry.id || "seg1", pct: entry.pct || 0, startDate: entry.startDate || "", endDate: entry.endDate || "", confirmed: !!entry.confirmed, status: entry.status || "current" }];
 }
-function segmentsTotalPct(entry) {
-  return toSegments(entry).reduce((sum, seg) => sum + (Number(seg.pct) || 0), 0);
+function segmentsTotalPct(entry, statusFilter) {
+  return toSegments(entry)
+    .filter((seg) => (statusFilter ? (seg.status || "current") === statusFilter : true))
+    .reduce((sum, seg) => sum + (Number(seg.pct) || 0), 0);
 }
 function fte(pct) {
   return (Number(pct) / 100).toFixed(2);
@@ -262,19 +270,23 @@ function buildAllocationByProject(projects, people, allocations) {
           start: seg.startDate,
           end: seg.endDate,
           confirmed: seg.confirmed,
+          status: seg.status || "current",
           outOfWindow: isOutsideWindow(seg.startDate, seg.endDate, pr.startDate, pr.endDate),
         });
       });
     });
     rows.sort((a, b) => (a.start || "9999-99-99").localeCompare(b.start || "9999-99-99"));
-    return { project: pr, rows };
+    const currentTotal = rows.filter((r) => r.status === "current").reduce((sum, r) => sum + (Number(r.pct) || 0), 0);
+    const proposedTotal = rows.filter((r) => r.status === "proposed").reduce((sum, r) => sum + (Number(r.pct) || 0), 0);
+    return { project: pr, rows, currentTotal, proposedTotal };
   });
 }
 
 function buildAllocationCSV(groupedByProject) {
-  const header = ["Project", "Project duration", "Resource", "Allocation %", "FTE", "Start", "End", "Confirmed", "Outside project window"];
+  const header = ["Project", "Project duration", "Resource", "Allocation %", "FTE", "Start", "End", "Status", "Confirmed", "Outside project window"];
   const rows = [];
-  groupedByProject.forEach(({ project, rows: segRows }) => {
+  groupedByProject.forEach(({ project, rows: segRows, currentTotal, proposedTotal }) => {
+    if (!segRows.length) return;
     segRows.forEach((r) => {
       rows.push([
         project.name,
@@ -284,23 +296,28 @@ function buildAllocationCSV(groupedByProject) {
         r.fteVal,
         r.start,
         r.end,
+        r.status === "proposed" ? "Proposed" : "Current",
         r.confirmed ? "Yes" : "No",
         r.outOfWindow ? "Yes" : "No",
       ]);
     });
+    rows.push([project.name, "TOTAL", "", currentTotal, fte(currentTotal), "", "", proposedTotal ? `+${proposedTotal}% proposed (${fte(proposedTotal)} FTE)` : "", "", ""]);
   });
   return [header, ...rows];
 }
 
-function buildUtilisationReport(people, totalsByPerson) {
-  const header = ["Team member", "Role", "Total allocation %", "Total FTE", "Available %", "Status"];
+function buildUtilisationReport(people, totalsByPerson, proposedTotalsByPerson) {
+  const header = ["Team member", "Role", "Current %", "Current FTE", "Proposed %", "Proposed FTE", "Available %", "Status"];
   const rows = people.map((p) => {
     const total = totalsByPerson[p.id] || 0;
+    const proposed = proposedTotalsByPerson[p.id] || 0;
     return [
       p.name,
       p.role,
       total,
       fte(total),
+      proposed,
+      fte(proposed),
       Math.max(0, 100 - total),
       total > 100 ? "Over-allocated" : total >= 90 ? "Near capacity" : "OK",
     ];
@@ -308,7 +325,7 @@ function buildUtilisationReport(people, totalsByPerson) {
   return [header, ...rows];
 }
 
-function buildConsolidatedReport(people, skills, skillLevels, projects, allocations, totalsByPerson) {
+function buildConsolidatedReport(people, skills, skillLevels, projects, allocations, totalsByPerson, proposedTotalsByPerson) {
   return [
     ["SKILLS REPORT"],
     ...buildSkillsReport(people, skills, skillLevels),
@@ -317,7 +334,7 @@ function buildConsolidatedReport(people, skills, skillLevels, projects, allocati
     ...buildAllocationCSV(buildAllocationByProject(projects, people, allocations)),
     [],
     ["UTILISATION REPORT"],
-    ...buildUtilisationReport(people, totalsByPerson),
+    ...buildUtilisationReport(people, totalsByPerson, proposedTotalsByPerson),
   ];
 }
 
@@ -370,15 +387,25 @@ function buildSkillsPDF(people, skills, skillLevels) {
 function addAllocationSections(doc, startY, projects, people, allocations) {
   let y = startY;
   const grouped = buildAllocationByProject(projects, people, allocations);
-  grouped.forEach(({ project, rows }) => {
+  grouped.forEach(({ project, rows, currentTotal, proposedTotal }) => {
     if (!rows.length) return;
-    if (y > 680) {
+    if (y > 660) {
       doc.addPage();
       y = 40;
     }
-    const head = ["Resource", "Allocation %", "FTE", "Start", "End", "Confirmed", "Outside window"];
-    const body = rows.map((r) => [r.person, r.pct, r.fteVal, formatDate(r.start) || "-", formatDate(r.end) || "-", r.confirmed ? "Yes" : "No", r.outOfWindow ? "Yes" : "No"]);
-    y = addTableSection(doc, y, project.name, `${formatDate(project.startDate) || "?"} - ${formatDate(project.endDate) || "?"}`, head, body);
+    const head = ["Resource", "Allocation %", "FTE", "Start", "End", "Status", "Confirmed", "Outside window"];
+    const body = rows.map((r) => [
+      r.person,
+      r.pct,
+      r.fteVal,
+      formatDate(r.start) || "-",
+      formatDate(r.end) || "-",
+      r.status === "proposed" ? "Proposed" : "Current",
+      r.confirmed ? "Yes" : "No",
+      r.outOfWindow ? "Yes" : "No",
+    ]);
+    const totalsLine = `Total: ${currentTotal}% current (${fte(currentTotal)} FTE)${proposedTotal ? ` · +${proposedTotal}% proposed (${fte(proposedTotal)} FTE)` : ""}`;
+    y = addTableSection(doc, y, project.name, `${formatDate(project.startDate) || "?"} - ${formatDate(project.endDate) || "?"} — ${totalsLine}`, head, body);
   });
   return y;
 }
@@ -389,18 +416,19 @@ function buildAllocationPDF(projects, people, allocations) {
   return doc;
 }
 
-function buildUtilisationPDF(people, totalsByPerson) {
+function buildUtilisationPDF(people, totalsByPerson, proposedTotalsByPerson) {
   const doc = newReportDoc("Utilisation by Resource");
-  const head = ["Team member", "Role", "Total %", "FTE", "Available %", "Status"];
+  const head = ["Team member", "Role", "Current %", "Current FTE", "Proposed %", "Proposed FTE", "Available %", "Status"];
   const body = people.map((p) => {
     const total = totalsByPerson[p.id] || 0;
-    return [p.name, p.role, total, fte(total), Math.max(0, 100 - total), total > 100 ? "Over-allocated" : total >= 90 ? "Near capacity" : "OK"];
+    const proposed = proposedTotalsByPerson[p.id] || 0;
+    return [p.name, p.role, total, fte(total), proposed, fte(proposed), Math.max(0, 100 - total), total > 100 ? "Over-allocated" : total >= 90 ? "Near capacity" : "OK"];
   });
-  addTableSection(doc, 76, "Current allocation & utilisation", null, head, body);
+  addTableSection(doc, 76, "Current vs proposed allocation & utilisation", null, head, body);
   return doc;
 }
 
-function buildConsolidatedPDF(people, skills, skillLevels, projects, allocations, totalsByPerson) {
+function buildConsolidatedPDF(people, skills, skillLevels, projects, allocations, totalsByPerson, proposedTotalsByPerson) {
   const doc = newReportDoc("Resourcing Consolidated Report");
   addTableSection(
     doc,
@@ -420,12 +448,13 @@ function buildConsolidatedPDF(people, skills, skillLevels, projects, allocations
   doc.addPage();
   doc.setFontSize(14);
   doc.text("Utilisation by Resource", 40, 40);
-  const uHead = ["Team member", "Role", "Total %", "FTE", "Available %", "Status"];
+  const uHead = ["Team member", "Role", "Current %", "Current FTE", "Proposed %", "Proposed FTE", "Available %", "Status"];
   const uBody = people.map((p) => {
     const total = totalsByPerson[p.id] || 0;
-    return [p.name, p.role, total, fte(total), Math.max(0, 100 - total), total > 100 ? "Over-allocated" : total >= 90 ? "Near capacity" : "OK"];
+    const proposed = proposedTotalsByPerson[p.id] || 0;
+    return [p.name, p.role, total, fte(total), proposed, fte(proposed), Math.max(0, 100 - total), total > 100 ? "Over-allocated" : total >= 90 ? "Near capacity" : "OK"];
   });
-  addTableSection(doc, 66, "Current allocation & utilisation", null, uHead, uBody);
+  addTableSection(doc, 66, "Current vs proposed allocation & utilisation", null, uHead, uBody);
 
   return doc;
 }
@@ -479,23 +508,37 @@ export default function App() {
     await setAppSettingsData({ logRetentionDays, clearLog: nextLog });
   };
 
+  // Current-only (committed) totals - drives capacity, charts and ranking.
   const totalsByPerson = useMemo(() => {
     const totals = {};
     people.forEach((p) => {
       totals[p.id] = projects.reduce(
-        (sum, pr) => sum + segmentsTotalPct(allocations[`${p.id}|${pr.id}`]),
+        (sum, pr) => sum + segmentsTotalPct(allocations[`${p.id}|${pr.id}`], "current"),
         0
       );
     });
     return totals;
   }, [people, projects, allocations]);
 
+  // Current + proposed combined - "what utilisation would be if proposals are accepted".
+  const proposedTotalsByPerson = useMemo(() => {
+    const totals = {};
+    people.forEach((p) => {
+      const proposedOnly = projects.reduce(
+        (sum, pr) => sum + segmentsTotalPct(allocations[`${p.id}|${pr.id}`], "proposed"),
+        0
+      );
+      totals[p.id] = (totalsByPerson[p.id] || 0) + proposedOnly;
+    });
+    return totals;
+  }, [people, projects, allocations, totalsByPerson]);
+
   const chartData = useMemo(
     () =>
       people.map((p) => {
         const row = { name: p.name.replace("Team Member ", "TM"), total: totalsByPerson[p.id] };
         projects.forEach((pr) => {
-          row[pr.name] = segmentsTotalPct(allocations[`${p.id}|${pr.id}`]);
+          row[pr.name] = segmentsTotalPct(allocations[`${p.id}|${pr.id}`], "current");
         });
         return row;
       }),
@@ -593,6 +636,7 @@ export default function App() {
               projects={projects}
               allocations={allocations}
               totalsByPerson={totalsByPerson}
+              proposedTotalsByPerson={proposedTotalsByPerson}
               chartData={chartData}
               projectColors={projectColors}
               onChangeAllocations={(next) => setAllocData({ projects, allocations: next })}
@@ -618,6 +662,7 @@ export default function App() {
               projects={projects}
               allocations={allocations}
               totalsByPerson={totalsByPerson}
+              proposedTotalsByPerson={proposedTotalsByPerson}
             />
           ) : (
             <SettingsPage
@@ -791,10 +836,12 @@ function SkillMatrix({ people, skills, skillLevels, lockedPeople, onChange, onAd
 }
 
 // ---------- Current utilisation ----------
-function CurrentUtilisation({ people, projects, allocations, totalsByPerson, chartData, projectColors, onChangeAllocations, onAddProject, onRemoveProject }) {
+function CurrentUtilisation({ people, projects, allocations, totalsByPerson, proposedTotalsByPerson, chartData, projectColors, onChangeAllocations, onAddProject, onRemoveProject }) {
   const [newProject, setNewProject] = useState("");
   const [newProjectStart, setNewProjectStart] = useState("");
   const [newProjectEnd, setNewProjectEnd] = useState("");
+
+  const RESETS_CONFIRM = new Set(["pct", "startDate", "endDate"]);
 
   const setSegmentField = (personId, projectId, segId, field, value) => {
     const key = `${personId}|${projectId}`;
@@ -802,9 +849,9 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
     const exists = segments.some((seg) => seg.id === segId);
     const nextSegments = exists
       ? segments.map((seg) =>
-          seg.id === segId ? { ...seg, [field]: value, ...(field === "confirmed" ? {} : { confirmed: false }) } : seg
+          seg.id === segId ? { ...seg, [field]: value, ...(RESETS_CONFIRM.has(field) ? { confirmed: false } : {}) } : seg
         )
-      : [...segments, { id: segId, pct: 0, startDate: "", endDate: "", confirmed: false, [field]: value }];
+      : [...segments, { id: segId, pct: 0, startDate: "", endDate: "", confirmed: false, status: "current", [field]: value }];
     onChangeAllocations({ ...allocations, [key]: nextSegments });
   };
 
@@ -813,7 +860,7 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
     const segments = toSegments(allocations[key]);
     onChangeAllocations({
       ...allocations,
-      [key]: [...segments, { id: `seg${Date.now()}`, pct: 0, startDate: "", endDate: "", confirmed: false }],
+      [key]: [...segments, { id: `seg${Date.now()}`, pct: 0, startDate: "", endDate: "", confirmed: false, status: "proposed" }],
     });
   };
 
@@ -831,6 +878,7 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
   };
 
   const totalAllocatedFte = people.reduce((sum, p) => sum + (totalsByPerson[p.id] || 0) / 100, 0);
+  const totalProposedFte = people.reduce((sum, p) => sum + (proposedTotalsByPerson[p.id] || 0) / 100, 0);
   const avgUtilisation = people.length ? people.reduce((sum, p) => sum + (totalsByPerson[p.id] || 0), 0) / people.length : 0;
   const overAllocatedCount = people.filter((p) => (totalsByPerson[p.id] || 0) > 100).length;
 
@@ -845,7 +893,13 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
       </div>
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 18 }}>
-        <StatCard label="Total allocated FTE" value={totalAllocatedFte.toFixed(2)} sub={`across ${people.length} team members`} />
+        <StatCard label="Current allocated FTE" value={totalAllocatedFte.toFixed(2)} sub={`across ${people.length} team members`} />
+        <StatCard
+          label="Proposed FTE"
+          value={totalProposedFte.toFixed(2)}
+          sub="if proposals accepted"
+          color={totalProposedFte > totalAllocatedFte ? "var(--warn)" : "var(--text)"}
+        />
         <StatCard label="Average utilisation" value={`${avgUtilisation.toFixed(0)}%`} color={pctColor(avgUtilisation)} />
         <StatCard
           label="Over-allocated"
@@ -881,6 +935,7 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
           <tbody>
             {people.map((p) => {
               const total = totalsByPerson[p.id];
+              const proposed = proposedTotalsByPerson[p.id] || 0;
               return (
                 <tr key={p.id}>
                   <td className="rowhead">
@@ -890,8 +945,9 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
                   {projects.map((pr) => {
                     const key = `${p.id}|${pr.id}`;
                     const rawSegments = toSegments(allocations[key]);
-                    const segments = rawSegments.length ? rawSegments : [{ id: "seg1", pct: 0, startDate: "", endDate: "", confirmed: false }];
-                    const cellTotal = segmentsTotalPct(allocations[key]);
+                    const segments = rawSegments.length ? rawSegments : [{ id: "seg1", pct: 0, startDate: "", endDate: "", confirmed: false, status: "current" }];
+                    const cellCurrent = segmentsTotalPct(allocations[key], "current");
+                    const cellProposed = segmentsTotalPct(allocations[key], "proposed");
                     return (
                       <td key={pr.id}>
                         <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 128 }}>
@@ -907,6 +963,24 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
                                   borderRadius: outOfWindow ? 4 : undefined,
                                 }}
                               >
+                                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 3 }}>
+                                  <button
+                                    onClick={() => setSegmentField(p.id, pr.id, seg.id, "status", (seg.status || "current") === "current" ? "proposed" : "current")}
+                                    title="Toggle current / proposed"
+                                    style={{
+                                      fontSize: 9,
+                                      fontWeight: 600,
+                                      padding: "1px 7px",
+                                      borderRadius: 8,
+                                      cursor: "pointer",
+                                      border: `1px solid ${(seg.status || "current") === "proposed" ? "var(--warn)" : "var(--accent)"}`,
+                                      color: (seg.status || "current") === "proposed" ? "var(--warn)" : "var(--accent)",
+                                      background: (seg.status || "current") === "proposed" ? "var(--warn-light)" : "var(--accent-light)",
+                                    }}
+                                  >
+                                    {(seg.status || "current") === "proposed" ? "Proposed" : "Current"}
+                                  </button>
+                                </div>
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
                                   <input
                                     className="rd-input"
@@ -988,19 +1062,43 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, cha
                           </button>
 
                           {segments.length > 1 && (
-                            <div style={{ fontSize: 10, fontWeight: 600, color: pctColor(cellTotal) }}>Total {cellTotal}%</div>
+                            <div style={{ fontSize: 10, fontWeight: 600 }}>
+                              <span style={{ color: pctColor(cellCurrent) }}>Current {cellCurrent}%</span>
+                              {cellProposed > 0 && <span style={{ color: "var(--warn)", marginLeft: 4 }}>+Proposed {cellProposed}%</span>}
+                            </div>
                           )}
                         </div>
                       </td>
                     );
                   })}
-                  <td style={{ fontFamily: "var(--mono)", fontWeight: 700, color: pctColor(total) }}>
-                    {total}%
+                  <td style={{ fontFamily: "var(--mono)" }}>
+                    <div style={{ fontWeight: 700, color: pctColor(total) }}>{total}%</div>
+                    {proposed > total && (
+                      <div style={{ fontSize: 10, color: "var(--warn)", fontWeight: 600 }}>&rarr; {proposed}% proposed</div>
+                    )}
                   </td>
                 </tr>
               );
             })}
           </tbody>
+          <tfoot>
+            <tr>
+              <td className="rowhead" style={{ fontWeight: 700 }}>Project total</td>
+              {projects.map((pr) => {
+                const projCurrent = people.reduce((sum, p) => sum + segmentsTotalPct(allocations[`${p.id}|${pr.id}`], "current"), 0);
+                const projProposed = people.reduce((sum, p) => sum + segmentsTotalPct(allocations[`${p.id}|${pr.id}`], "proposed"), 0);
+                return (
+                  <td key={pr.id} style={{ fontFamily: "var(--mono)", fontSize: 11 }}>
+                    <div style={{ fontWeight: 700 }}>{projCurrent}% &middot; {fte(projCurrent)} FTE</div>
+                    {projProposed > 0 && (
+                      <div style={{ color: "var(--warn)" }}>+{projProposed}% &middot; {fte(projProposed)} FTE proposed</div>
+                    )}
+                  </td>
+                );
+              })}
+              <td></td>
+            </tr>
+          </tfoot>
         </table>
       </div>
 
@@ -1165,13 +1263,14 @@ function ForwardCapacity({ people, skills, skillLevels, upcoming, capacityData, 
 }
 
 // ---------- Reports ----------
-function ReportsPage({ people, skills, skillLevels, projects, allocations, totalsByPerson }) {
+function ReportsPage({ people, skills, skillLevels, projects, allocations, totalsByPerson, proposedTotalsByPerson }) {
   const stamp = new Date().toISOString().slice(0, 10);
 
   const avgProficiency = people.length && skills.length
     ? people.reduce((sum, p) => sum + skills.reduce((s2, sk) => s2 + (skillLevels[`${p.id}|${sk.id}`] || 0), 0), 0) / (people.length * skills.length)
     : 0;
   const totalAllocatedFte = people.reduce((sum, p) => sum + (totalsByPerson[p.id] || 0) / 100, 0);
+  const totalProposedFte = people.reduce((sum, p) => sum + (proposedTotalsByPerson[p.id] || 0) / 100, 0);
   const avgUtilisation = people.length ? people.reduce((sum, p) => sum + (totalsByPerson[p.id] || 0), 0) / people.length : 0;
 
   const cards = [
@@ -1185,16 +1284,16 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
     {
       key: "allocation",
       label: "Allocation by project",
-      detail: `${projects.length} projects · resources grouped per project, ordered by period`,
+      detail: `${projects.length} projects · resources grouped per project, ordered by period, current vs proposed`,
       onDownloadCSV: () => downloadCSV(`allocation-by-project-${stamp}.csv`, buildAllocationCSV(buildAllocationByProject(projects, people, allocations))),
       onDownloadPDF: () => buildAllocationPDF(projects, people, allocations).save(`allocation-by-project-${stamp}.pdf`),
     },
     {
       key: "utilisation",
       label: "Utilisation per resource",
-      detail: `Current FTE allocation and utilisation per team member`,
-      onDownloadCSV: () => downloadCSV(`utilisation-report-${stamp}.csv`, buildUtilisationReport(people, totalsByPerson)),
-      onDownloadPDF: () => buildUtilisationPDF(people, totalsByPerson).save(`utilisation-report-${stamp}.pdf`),
+      detail: `Current vs proposed FTE allocation and utilisation per team member`,
+      onDownloadCSV: () => downloadCSV(`utilisation-report-${stamp}.csv`, buildUtilisationReport(people, totalsByPerson, proposedTotalsByPerson)),
+      onDownloadPDF: () => buildUtilisationPDF(people, totalsByPerson, proposedTotalsByPerson).save(`utilisation-report-${stamp}.pdf`),
     },
   ];
 
@@ -1216,7 +1315,13 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
 
       <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>Current FTE allocation &amp; utilisation, live</div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
-        <StatCard label="Total allocated FTE" value={totalAllocatedFte.toFixed(2)} />
+        <StatCard label="Current allocated FTE" value={totalAllocatedFte.toFixed(2)} />
+        <StatCard
+          label="Proposed FTE"
+          value={totalProposedFte.toFixed(2)}
+          sub="if proposals accepted"
+          color={totalProposedFte > totalAllocatedFte ? "var(--warn)" : "var(--text)"}
+        />
         <StatCard label="Average utilisation" value={`${avgUtilisation.toFixed(0)}%`} color={pctColor(avgUtilisation)} />
       </div>
 
@@ -1227,6 +1332,7 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
               <th style={{ textAlign: "left" }}>Team member</th>
               <th style={{ textAlign: "left" }}>Role</th>
               <th>Current FTE</th>
+              <th>Proposed FTE</th>
               <th>Utilisation</th>
               <th>Status</th>
             </tr>
@@ -1234,11 +1340,15 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
           <tbody>
             {people.map((p) => {
               const total = totalsByPerson[p.id] || 0;
+              const proposed = proposedTotalsByPerson[p.id] || 0;
               return (
                 <tr key={p.id}>
                   <td style={{ textAlign: "left", fontWeight: 600 }}>{p.name}</td>
                   <td style={{ textAlign: "left", color: "var(--text-muted)" }}>{p.role}</td>
                   <td style={{ fontFamily: "var(--mono)" }}>{fte(total)}</td>
+                  <td style={{ fontFamily: "var(--mono)", color: proposed > total ? "var(--warn)" : "var(--text-muted)" }}>
+                    {proposed > total ? fte(proposed) : "-"}
+                  </td>
                   <td style={{ fontFamily: "var(--mono)", fontWeight: 700, color: pctColor(total) }}>{total}%</td>
                   <td>{total > 100 ? "Over-allocated" : total >= 90 ? "Near capacity" : "OK"}</td>
                 </tr>
@@ -1277,14 +1387,14 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
           <button
             className="rd-add-btn"
             style={{ color: "var(--accent)", borderColor: "var(--accent)" }}
-            onClick={() => downloadCSV(`resourcing-consolidated-report-${stamp}.csv`, buildConsolidatedReport(people, skills, skillLevels, projects, allocations, totalsByPerson))}
+            onClick={() => downloadCSV(`resourcing-consolidated-report-${stamp}.csv`, buildConsolidatedReport(people, skills, skillLevels, projects, allocations, totalsByPerson, proposedTotalsByPerson))}
           >
             <FileDown size={13} /> Consolidated CSV
           </button>
           <button
             className="rd-add-btn"
             style={{ color: "var(--accent)", borderColor: "var(--accent)" }}
-            onClick={() => buildConsolidatedPDF(people, skills, skillLevels, projects, allocations, totalsByPerson).save(`resourcing-consolidated-report-${stamp}.pdf`)}
+            onClick={() => buildConsolidatedPDF(people, skills, skillLevels, projects, allocations, totalsByPerson, proposedTotalsByPerson).save(`resourcing-consolidated-report-${stamp}.pdf`)}
           >
             <FileText size={13} /> Consolidated PDF
           </button>
