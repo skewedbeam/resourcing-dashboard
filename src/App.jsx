@@ -229,6 +229,11 @@ function isOutsideWindow(allocStart, allocEnd, projStart, projEnd) {
   if (!allocStart || !allocEnd || !projStart || !projEnd) return false;
   return allocStart < projStart || allocEnd > projEnd;
 }
+// True only once both dates are set and "to" is before "from" - an
+// incomplete range (only one date picked yet) is not an error.
+function isDateRangeInvalid(start, end) {
+  return !!start && !!end && end < start;
+}
 
 function pruneClearLog(log, retentionDays) {
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
@@ -1038,19 +1043,26 @@ function Dashboard({ people, skills, skillLevels, projects, allocations, upcomin
 function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemoveProject }) {
   const [editingId, setEditingId] = useState(null);
   const [draft, setDraft] = useState({ name: "", startDate: "", endDate: "", requiredSkillIds: [] });
+  const [editDateError, setEditDateError] = useState(false);
 
   const [newName, setNewName] = useState("");
   const [newStart, setNewStart] = useState("");
   const [newEnd, setNewEnd] = useState("");
   const [newSkillIds, setNewSkillIds] = useState([]);
+  const [addDateError, setAddDateError] = useState(false);
 
   const startEdit = (pr) => {
     setEditingId(pr.id);
     setDraft({ name: pr.name, startDate: pr.startDate || "", endDate: pr.endDate || "", requiredSkillIds: pr.requiredSkillIds || [] });
+    setEditDateError(false);
   };
   const cancelEdit = () => setEditingId(null);
   const saveEdit = () => {
     if (!draft.name.trim()) return;
+    if (isDateRangeInvalid(draft.startDate, draft.endDate)) {
+      setEditDateError(true);
+      return;
+    }
     onUpdateProject(editingId, { name: draft.name.trim(), startDate: draft.startDate, endDate: draft.endDate, requiredSkillIds: draft.requiredSkillIds });
     setEditingId(null);
   };
@@ -1060,11 +1072,16 @@ function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemov
   const toggleNewSkill = (id) => setNewSkillIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
   const addProject = () => {
     if (!newName.trim()) return;
+    if (isDateRangeInvalid(newStart, newEnd)) {
+      setAddDateError(true);
+      return;
+    }
     onAddProject({ id: `pr${Date.now()}`, name: newName.trim(), startDate: newStart, endDate: newEnd, requiredSkillIds: newSkillIds });
     setNewName("");
     setNewStart("");
     setNewEnd("");
     setNewSkillIds([]);
+    setAddDateError(false);
   };
 
   return (
@@ -1084,10 +1101,29 @@ function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemov
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <input className="rd-text" value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} style={{ minWidth: 220, flex: 1 }} autoFocus />
-                  <input className="rd-text" type="date" title="Start date" value={draft.startDate} onChange={(e) => setDraft((d) => ({ ...d, startDate: e.target.value }))} />
+                  <input
+                    className="rd-text"
+                    type="date"
+                    title="Start date"
+                    value={draft.startDate}
+                    onChange={(e) => { setDraft((d) => ({ ...d, startDate: e.target.value })); setEditDateError(false); }}
+                    style={editDateError ? { borderColor: "var(--danger)" } : undefined}
+                  />
                   <span style={{ fontSize: 12, color: "var(--text-muted)", alignSelf: "center" }}>to</span>
-                  <input className="rd-text" type="date" title="End date" value={draft.endDate} onChange={(e) => setDraft((d) => ({ ...d, endDate: e.target.value }))} />
+                  <input
+                    className="rd-text"
+                    type="date"
+                    title="End date"
+                    value={draft.endDate}
+                    onChange={(e) => { setDraft((d) => ({ ...d, endDate: e.target.value })); setEditDateError(false); }}
+                    style={editDateError ? { borderColor: "var(--danger)" } : undefined}
+                  />
                 </div>
+                {editDateError && (
+                  <div style={{ fontSize: 11.5, color: "var(--danger)", display: "flex", alignItems: "center", gap: 4, marginTop: -4 }}>
+                    <AlertTriangle size={12} /> End date can't be before the start date.
+                  </div>
+                )}
                 <div>
                   <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 6 }}>Required skills</div>
                   {skills.map((s) => (
@@ -1145,10 +1181,29 @@ function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemov
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Add project</div>
         <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
           <input className="rd-text" placeholder="Project name" value={newName} onChange={(e) => setNewName(e.target.value)} style={{ minWidth: 220, flex: 1 }} />
-          <input className="rd-text" type="date" title="Start date" value={newStart} onChange={(e) => setNewStart(e.target.value)} />
+          <input
+            className="rd-text"
+            type="date"
+            title="Start date"
+            value={newStart}
+            onChange={(e) => { setNewStart(e.target.value); setAddDateError(false); }}
+            style={addDateError ? { borderColor: "var(--danger)" } : undefined}
+          />
           <span style={{ fontSize: 12, color: "var(--text-muted)", alignSelf: "center" }}>to</span>
-          <input className="rd-text" type="date" title="End date" value={newEnd} onChange={(e) => setNewEnd(e.target.value)} />
+          <input
+            className="rd-text"
+            type="date"
+            title="End date"
+            value={newEnd}
+            onChange={(e) => { setNewEnd(e.target.value); setAddDateError(false); }}
+            style={addDateError ? { borderColor: "var(--danger)" } : undefined}
+          />
         </div>
+        {addDateError && (
+          <div style={{ fontSize: 11.5, color: "var(--danger)", display: "flex", alignItems: "center", gap: 4, marginBottom: 10 }}>
+            <AlertTriangle size={12} /> End date can't be before the start date.
+          </div>
+        )}
         <div style={{ marginBottom: 10 }}>
           <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 6 }}>Required skills</div>
           {skills.map((s) => (
@@ -1507,31 +1562,49 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, pro
                                     </button>
                                   </div>
                                 ) : (
-                                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, marginTop: 3, flexWrap: "wrap" }}>
-                                    <input
-                                      className="rd-date"
-                                      type="date"
-                                      title="Split start date"
-                                      value={seg.startDate}
-                                      onChange={(e) => setSegmentField(p.id, pr.id, seg.id, "startDate", e.target.value)}
-                                    />
-                                    <span style={{ fontSize: 10, color: "var(--text-muted)" }}>&rarr;</span>
-                                    <input
-                                      className="rd-date"
-                                      type="date"
-                                      title="Split end date"
-                                      value={seg.endDate}
-                                      onChange={(e) => setSegmentField(p.id, pr.id, seg.id, "endDate", e.target.value)}
-                                    />
-                                    <button
-                                      className="rd-remove-btn"
-                                      onClick={() => seg.startDate && seg.endDate && setSegmentField(p.id, pr.id, seg.id, "confirmed", true)}
-                                      title={seg.startDate && seg.endDate ? "Confirm split dates" : "Set both dates to confirm"}
-                                      disabled={!seg.startDate || !seg.endDate}
-                                      style={{ color: seg.startDate && seg.endDate ? "var(--accent)" : "var(--border)", cursor: seg.startDate && seg.endDate ? "pointer" : "not-allowed" }}
-                                    >
-                                      <Check size={12} />
-                                    </button>
+                                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, marginTop: 3 }}>
+                                    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, flexWrap: "wrap" }}>
+                                      <input
+                                        className="rd-date"
+                                        type="date"
+                                        title="Split start date"
+                                        value={seg.startDate}
+                                        onChange={(e) => setSegmentField(p.id, pr.id, seg.id, "startDate", e.target.value)}
+                                        style={isDateRangeInvalid(seg.startDate, seg.endDate) ? { borderColor: "var(--danger)" } : undefined}
+                                      />
+                                      <span style={{ fontSize: 10, color: "var(--text-muted)" }}>&rarr;</span>
+                                      <input
+                                        className="rd-date"
+                                        type="date"
+                                        title="Split end date"
+                                        value={seg.endDate}
+                                        onChange={(e) => setSegmentField(p.id, pr.id, seg.id, "endDate", e.target.value)}
+                                        style={isDateRangeInvalid(seg.startDate, seg.endDate) ? { borderColor: "var(--danger)" } : undefined}
+                                      />
+                                      <button
+                                        className="rd-remove-btn"
+                                        onClick={() => seg.startDate && seg.endDate && !isDateRangeInvalid(seg.startDate, seg.endDate) && setSegmentField(p.id, pr.id, seg.id, "confirmed", true)}
+                                        title={
+                                          isDateRangeInvalid(seg.startDate, seg.endDate)
+                                            ? "End date can't be before the start date"
+                                            : seg.startDate && seg.endDate
+                                            ? "Confirm split dates"
+                                            : "Set both dates to confirm"
+                                        }
+                                        disabled={!seg.startDate || !seg.endDate || isDateRangeInvalid(seg.startDate, seg.endDate)}
+                                        style={{
+                                          color: seg.startDate && seg.endDate && !isDateRangeInvalid(seg.startDate, seg.endDate) ? "var(--accent)" : "var(--border)",
+                                          cursor: seg.startDate && seg.endDate && !isDateRangeInvalid(seg.startDate, seg.endDate) ? "pointer" : "not-allowed",
+                                        }}
+                                      >
+                                        <Check size={12} />
+                                      </button>
+                                    </div>
+                                    {isDateRangeInvalid(seg.startDate, seg.endDate) && (
+                                      <div style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--danger)", fontSize: 9.5 }}>
+                                        <AlertTriangle size={10} /> End before start
+                                      </div>
+                                    )}
                                   </div>
                                 )}
 
@@ -1886,6 +1959,11 @@ function TimelinePage({ people, projects, allocations }) {
   const todayIso = new Date().toISOString().slice(0, 10);
   const todayPct = todayIso >= sortedDates[0] && todayIso <= sortedDates[sortedDates.length - 1] ? pctFor(todayIso) : null;
 
+  // Width scales with the actual date span so a multi-year range gets more
+  // room to breathe instead of being crushed into a fixed-width chart -
+  // the outer panel scrolls (both axes) once content exceeds its size.
+  const chartWidth = Math.max(900, Math.round(totalDays * 4));
+
   const groups =
     groupBy === "project"
       ? projects
@@ -1940,10 +2018,10 @@ function TimelinePage({ people, projects, allocations }) {
         </button>
       </div>
 
-      <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 6, background: "var(--panel)" }}>
-        <div style={{ minWidth: 900 }}>
-          <div style={{ display: "flex" }}>
-            <div style={{ width: 160, flexShrink: 0, borderBottom: "1px solid var(--border)" }} />
+      <div style={{ overflow: "auto", maxHeight: "min(70vh, 640px)", border: "1px solid var(--border)", borderRadius: 6, background: "var(--panel)" }}>
+        <div style={{ minWidth: chartWidth }}>
+          <div style={{ display: "flex", position: "sticky", top: 0, zIndex: 2, background: "var(--panel)" }}>
+            <div style={{ width: 160, flexShrink: 0, borderBottom: "1px solid var(--border)", position: "sticky", left: 0, zIndex: 1, background: "var(--panel)" }} />
             <div style={{ flex: 1, position: "relative", height: 28, borderBottom: "1px solid var(--border)" }}>
               {months.map((m, i) => (
                 <div
@@ -1963,7 +2041,7 @@ function TimelinePage({ people, projects, allocations }) {
 
           {groups.map((g) => (
             <div key={g.key} style={{ display: "flex", borderBottom: "1px solid var(--border)" }}>
-              <div style={{ width: 160, flexShrink: 0, padding: "8px 10px", fontSize: 12, fontWeight: 600 }}>{g.heading}</div>
+              <div style={{ width: 160, flexShrink: 0, padding: "8px 10px", fontSize: 12, fontWeight: 600, position: "sticky", left: 0, zIndex: 1, background: "var(--panel)", borderRight: "1px solid var(--border)" }}>{g.heading}</div>
               <div style={{ flex: 1, position: "relative", minHeight: Math.max(34, 10 + g.bars.length * 22), padding: "6px 0" }}>
                 {g.band && (
                   <div
