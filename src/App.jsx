@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   BarChart,
   Bar,
@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText, ThumbsUp, ThumbsDown, GanttChart, Briefcase, KeyRound } from "lucide-react";
+import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText, ThumbsUp, ThumbsDown, GanttChart, Briefcase, KeyRound, LayoutDashboard, Users, Gauge, UploadCloud } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -252,6 +252,25 @@ function downloadCSV(filename, rows) {
   URL.revokeObjectURL(url);
 }
 
+function downloadJSON(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Full-fidelity backup of every Supabase-backed bucket, restorable via
+// importFullBackup below. This is separate from the Reports CSV/PDF exports,
+// which are one-way summaries rather than round-trippable data.
+function buildFullBackup(state) {
+  return { format: "resourcing-app-backup", version: 2, exportedAt: new Date().toISOString(), ...state };
+}
+
 function buildSkillsReport(people, skills, skillLevels) {
   const header = ["Team member", "Role", ...skills.map((s) => s.name)];
   const rows = people.map((p) => [
@@ -467,7 +486,7 @@ function buildConsolidatedPDF(people, skills, skillLevels, projects, allocations
 }
 
 export default function App() {
-  const [tab, setTab] = useState("skills");
+  const [tab, setTab] = useState("dashboard");
   const [editUnlocked, setEditUnlocked] = useState(() => {
     try {
       return localStorage.getItem(EDIT_UNLOCKED_KEY) === "true";
@@ -586,6 +605,36 @@ export default function App() {
 
   const projectColors = ["#2E6F6E", "#7A9E64", "#B8792E", "#5B7DA6", "#9A6B9E", "#AD4A32"];
 
+  const exportAllData = () => {
+    const payload = buildFullBackup({
+      people, skills, skillLevels, lockedPeople,
+      projects, allocations,
+      upcoming,
+      logRetentionDays, clearLog,
+    });
+    downloadJSON(`resourcing-backup-${new Date().toISOString().slice(0, 10)}.json`, payload);
+  };
+
+  const importAllData = async (data) => {
+    await setPeopleData({
+      people: data.people,
+      skills: data.skills || [],
+      skillLevels: data.skillLevels || {},
+      lockedPeople: data.lockedPeople || {},
+    });
+    await setAllocData({
+      projects: data.projects || [],
+      allocations: data.allocations || {},
+    });
+    await setUpcomingData({ upcoming: Array.isArray(data.upcoming) ? data.upcoming : [] });
+    if (data.logRetentionDays != null || Array.isArray(data.clearLog)) {
+      await setAppSettingsData({
+        logRetentionDays: data.logRetentionDays || logRetentionDays,
+        clearLog: Array.isArray(data.clearLog) ? data.clearLog : clearLog,
+      });
+    }
+  };
+
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: "var(--sans)", color: "var(--text)", background: "var(--bg)" }}>
       <style>{TOKENS}{`
@@ -616,6 +665,9 @@ export default function App() {
             <div style={{ color: "#fff", fontSize: 15, fontWeight: 600, letterSpacing: 0.2 }}>Resourcing</div>
             <div style={{ color: "var(--sidebar-text)", fontSize: 11.5, marginTop: 2 }}>Skills & allocation</div>
           </div>
+          <button className={`rd-sidebar-btn ${tab === "dashboard" ? "active" : ""}`} onClick={() => setTab("dashboard")}>
+            <LayoutDashboard size={15} /> Dashboard
+          </button>
           <button className={`rd-sidebar-btn ${tab === "projects" ? "active" : ""}`} onClick={() => setTab("projects")}>
             <Briefcase size={15} /> Projects
           </button>
@@ -654,6 +706,18 @@ export default function App() {
           )}
           {!loaded ? (
             <div style={{ color: "var(--text-muted)", fontSize: 13 }}>Loading...</div>
+          ) : tab === "dashboard" ? (
+            <Dashboard
+              people={people}
+              skills={skills}
+              skillLevels={skillLevels}
+              projects={projects}
+              allocations={allocations}
+              upcoming={upcoming}
+              totalsByPerson={totalsByPerson}
+              proposedTotalsByPerson={proposedTotalsByPerson}
+              onNavigate={setTab}
+            />
           ) : tab === "projects" ? (
             <fieldset disabled={!editUnlocked} style={FIELDSET_RESET}>
               <ProjectsPage
@@ -717,6 +781,7 @@ export default function App() {
               allocations={allocations}
               totalsByPerson={totalsByPerson}
               proposedTotalsByPerson={proposedTotalsByPerson}
+              onExportBackup={exportAllData}
             />
           ) : (
             <fieldset disabled={!editUnlocked} style={FIELDSET_RESET}>
@@ -729,10 +794,186 @@ export default function App() {
                 clearLog={clearLog}
                 onClearScope={clearScope}
                 onSetRetentionDays={(days) => setAppSettingsData({ logRetentionDays: days, clearLog })}
+                onImportBackup={importAllData}
               />
             </fieldset>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Dashboard ----------
+function Dashboard({ people, skills, skillLevels, projects, allocations, upcoming, totalsByPerson, proposedTotalsByPerson, onNavigate }) {
+  const stats = useMemo(() => {
+    const totals = people.map((p) => totalsByPerson[p.id] || 0);
+    const avgUtil = totals.length ? totals.reduce((s, t) => s + t, 0) / totals.length : 0;
+    const overCommitted = totals.filter((t) => t > 100).length;
+    const benchFte = totals.reduce((s, t) => s + Math.max(0, 100 - t), 0) / 100;
+    const pendingProposals = people.reduce(
+      (sum, p) => sum + projects.reduce((s2, pr) => s2 + toSegments(allocations[`${p.id}|${pr.id}`]).filter((seg) => (seg.status || "current") === "proposed").length, 0),
+      0
+    );
+
+    const projectRows = projects.map((pr) => {
+      const rows = people
+        .map((p) => ({ person: p, pct: segmentsTotalPct(allocations[`${p.id}|${pr.id}`], "current") }))
+        .filter((r) => r.pct > 0);
+      const totalAlloc = rows.reduce((s, r) => s + r.pct, 0);
+      return { project: pr, headcount: rows.length, totalAlloc };
+    });
+
+    const teamRows = people
+      .map((p) => ({ person: p, total: totalsByPerson[p.id] || 0, proposed: proposedTotalsByPerson[p.id] || 0 }))
+      .sort((a, b) => b.total - a.total);
+
+    const skillGaps = [];
+    upcoming.forEach((u) => {
+      (u.requiredSkillIds || []).forEach((sid) => {
+        const skill = skills.find((s) => s.id === sid);
+        if (!skill) return;
+        const maxLevel = Math.max(0, ...people.map((p) => skillLevels[`${p.id}|${sid}`] || 0));
+        if (maxLevel < 3) skillGaps.push({ project: u.name, skill: skill.name });
+      });
+    });
+
+    return { avgUtil, overCommitted, benchFte, pendingProposals, projectRows, teamRows, skillGaps };
+  }, [people, skills, skillLevels, projects, allocations, upcoming, totalsByPerson, proposedTotalsByPerson]);
+
+  const cards = [
+    { label: "Team members", value: people.length, icon: Users, tab: "skills" },
+    { label: "Active projects", value: projects.length, icon: Briefcase, tab: "projects" },
+    { label: "Avg. utilisation", value: `${Math.round(stats.avgUtil)}%`, icon: Gauge, tab: "current" },
+    { label: "Over-committed", value: stats.overCommitted, icon: AlertTriangle, tab: "current", warn: stats.overCommitted > 0 },
+    { label: "Bench capacity", value: `${stats.benchFte.toFixed(1)} FTE`, icon: TrendingUp, tab: "forward" },
+    { label: "Pipeline projects", value: upcoming.length, icon: LayoutDashboard, tab: "forward" },
+    { label: "Pending proposals", value: stats.pendingProposals, icon: ThumbsUp, tab: "current", warn: stats.pendingProposals > 0 },
+  ];
+
+  return (
+    <div>
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 19, fontWeight: 600 }}>Dashboard</div>
+        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
+          A ready reckoner of resourcing across the team, current projects and the pipeline.
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 26 }}>
+        {cards.map((c) => (
+          <button
+            key={c.label}
+            onClick={() => onNavigate(c.tab)}
+            style={{
+              textAlign: "left",
+              background: "var(--panel)",
+              border: `1px solid ${c.warn ? "var(--danger)" : "var(--border)"}`,
+              borderRadius: 6,
+              padding: "14px 16px",
+              cursor: "pointer",
+              fontFamily: "var(--sans)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 6, color: c.warn ? "var(--danger)" : "var(--text-muted)" }}>
+              <c.icon size={14} />
+              <span style={{ fontSize: 11.5 }}>{c.label}</span>
+            </div>
+            <div style={{ fontSize: 24, fontWeight: 700, marginTop: 6, color: c.warn ? "var(--danger)" : "var(--text)" }}>
+              {c.value}
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.3fr) minmax(0, 1fr)", gap: 18, marginBottom: 22 }}>
+        <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "16px 18px" }}>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Team allocation</div>
+          <table className="rd-table" style={{ fontSize: 12.5 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left" }}>Team member</th>
+                <th>Current</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stats.teamRows.map(({ person, total, proposed }) => (
+                <tr key={person.id}>
+                  <td className="rowhead">
+                    <div style={{ fontWeight: 600 }}>{person.name}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{person.role}</div>
+                  </td>
+                  <td style={{ fontFamily: "var(--mono)" }}>
+                    <div style={{ fontWeight: 700, color: pctColor(total) }}>{total}%</div>
+                    {proposed > total && <div style={{ fontSize: 10, color: "var(--warn)" }}>&rarr; {proposed}% proposed</div>}
+                  </td>
+                  <td style={{ fontSize: 11.5, color: pctColor(total) }}>
+                    {total > 100 ? "Over-committed" : total >= 90 ? "Near capacity" : "Available"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "16px 18px" }}>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Projects overview</div>
+          <table className="rd-table" style={{ fontSize: 12.5 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left" }}>Project</th>
+                <th>People</th>
+                <th>Total %</th>
+                <th>FTE</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stats.projectRows.length === 0 && (
+                <tr>
+                  <td colSpan={4} style={{ color: "var(--text-muted)", fontSize: 12 }}>No projects yet.</td>
+                </tr>
+              )}
+              {stats.projectRows.map(({ project, headcount, totalAlloc }) => (
+                <tr key={project.id}>
+                  <td className="rowhead" style={{ fontWeight: 600 }}>{project.name}</td>
+                  <td style={{ fontFamily: "var(--mono)" }}>{headcount}</td>
+                  <td style={{ fontFamily: "var(--mono)" }}>{totalAlloc}%</td>
+                  <td style={{ fontFamily: "var(--mono)" }}>{fte(totalAlloc)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "16px 18px" }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Pipeline & skill gaps</div>
+        {upcoming.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>No upcoming projects tracked.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {upcoming.map((u) => {
+              const gaps = stats.skillGaps.filter((g) => g.project === u.name);
+              return (
+                <div key={u.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{u.name}</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {gaps.length === 0 ? (
+                      <span className="rd-tag">Covered</span>
+                    ) : (
+                      gaps.map((g) => (
+                        <span key={g.skill} className="rd-tag" style={{ background: "var(--danger-light)", color: "var(--danger)" }}>
+                          Gap: {g.skill}
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1632,7 +1873,7 @@ function TimelinePage({ people, projects, allocations }) {
 }
 
 // ---------- Reports ----------
-function ReportsPage({ people, skills, skillLevels, projects, allocations, totalsByPerson, proposedTotalsByPerson }) {
+function ReportsPage({ people, skills, skillLevels, projects, allocations, totalsByPerson, proposedTotalsByPerson, onExportBackup }) {
   const stamp = new Date().toISOString().slice(0, 10);
 
   const avgProficiency = people.length && skills.length
@@ -1769,18 +2010,75 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
           </button>
         </div>
       </div>
+
+      <div style={{ marginTop: 22, background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontWeight: 600, fontSize: 13.5 }}>Full data backup (JSON)</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
+            Every underlying record - team, skills, projects, allocations, pipeline - in one restorable file. Restore it from Settings.
+          </div>
+        </div>
+        <button className="rd-add-btn" onClick={onExportBackup}>
+          <FileDown size={13} /> Export JSON backup
+        </button>
+      </div>
     </div>
   );
 }
 
 // ---------- Settings ----------
-function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, clearLog, onClearScope, onSetRetentionDays }) {
+function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, clearLog, onClearScope, onSetRetentionDays, onImportBackup }) {
   const [pendingScope, setPendingScope] = useState(null);
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [retentionDraft, setRetentionDraft] = useState(String(logRetentionDays));
+
+  const [importFile, setImportFile] = useState(null);
+  const [importData, setImportData] = useState(null);
+  const [importPassword, setImportPassword] = useState("");
+  const [importError, setImportError] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const importInputRef = useRef(null);
+
+  const pickImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    setImportError("");
+    setImportFile(null);
+    setImportData(null);
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (!Array.isArray(data.people) || !Array.isArray(data.skills) || !Array.isArray(data.projects)) {
+        throw new Error("This file doesn't look like a resourcing backup.");
+      }
+      setImportFile(file.name);
+      setImportData(data);
+    } catch (err) {
+      setImportError(err.message || String(err));
+    }
+  };
+
+  const cancelImport = () => {
+    setImportFile(null);
+    setImportData(null);
+    setImportPassword("");
+    setImportError("");
+  };
+
+  const confirmImport = async () => {
+    if (importPassword !== CLEAR_DATA_PASSWORD) {
+      setImportError("Incorrect password.");
+      return;
+    }
+    setImportBusy(true);
+    await onImportBackup(importData);
+    setImportBusy(false);
+    cancelImport();
+  };
 
   useEffect(() => {
     setRetentionDraft(String(logRetentionDays));
@@ -1883,6 +2181,60 @@ function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, cl
             )}
           </div>
         ))}
+      </div>
+
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+        <UploadCloud size={15} /> Restore from backup
+      </div>
+      <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "14px 16px", marginBottom: 28 }}>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
+          Import a JSON file exported from Reports &rarr; "Export JSON backup". This replaces the team, skills, projects,
+          allocations and pipeline data below with the contents of that file, for everyone viewing this app.
+        </div>
+        {!importData ? (
+          <>
+            <input ref={importInputRef} type="file" accept="application/json,.json" style={{ display: "none" }} onChange={pickImportFile} />
+            <button className="rd-add-btn" onClick={() => importInputRef.current?.click()}>
+              <UploadCloud size={13} /> Choose backup file
+            </button>
+            {importError && <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 8 }}>{importError}</div>}
+          </>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontSize: 12.5 }}>
+              Selected: <strong>{importFile}</strong> &middot; {importData.people.length} team members, {importData.projects.length} projects
+            </div>
+            <div style={{ fontSize: 12, color: "var(--danger)", display: "flex", alignItems: "center", gap: 5 }}>
+              <ShieldAlert size={13} /> Enter the password to overwrite the current shared data with this backup.
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <div style={{ position: "relative" }}>
+                <input
+                  className="rd-text"
+                  type={showPassword ? "text" : "password"}
+                  placeholder="Password"
+                  value={importPassword}
+                  onChange={(e) => setImportPassword(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") confirmImport(); }}
+                  style={{ minWidth: 180, paddingRight: 30 }}
+                  autoFocus
+                />
+                <button
+                  onClick={() => setShowPassword((v) => !v)}
+                  title={showPassword ? "Hide password" : "Show password"}
+                  style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", border: "none", background: "none", cursor: "pointer", color: "var(--text-muted)" }}
+                >
+                  {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </div>
+              <button className="rd-add-btn" style={{ color: "var(--danger)", borderColor: "var(--danger)" }} onClick={confirmImport} disabled={importBusy}>
+                <UploadCloud size={13} /> {importBusy ? "Restoring..." : "Confirm restore"}
+              </button>
+              <button className="rd-remove-btn" onClick={cancelImport} style={{ fontSize: 12.5 }}>Cancel</button>
+            </div>
+            {importError && <div style={{ fontSize: 12, color: "var(--danger)" }}>{importError}</div>}
+          </div>
+        )}
       </div>
 
       <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
