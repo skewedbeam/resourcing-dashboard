@@ -1620,33 +1620,57 @@ function CurrentUtilisation({ people, projects, allocations, totalsByPerson, pro
 function ForwardCapacity({ people, skills, skillLevels, upcoming, capacityData, totalsByPerson, onAddUpcoming, onRemoveUpcoming }) {
   const [newName, setNewName] = useState("");
   const [selectedSkillIds, setSelectedSkillIds] = useState([]);
+  const [skillWeight, setSkillWeight] = useState(70);
+  const capacityWeight = 100 - skillWeight;
 
   const toggleSkill = (id) => {
     setSelectedSkillIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
   };
 
-  const rank = (project) => {
+  // Every person, ranked - not just a shortlist. Over-allocated people stay in
+  // the list (just scored lower on the capacity half) so they're still visible
+  // as an option, flagged rather than hidden.
+  const rankAll = (project) => {
+    const relevant = project.requiredSkillIds.length ? project.requiredSkillIds : skills.map((s) => s.id);
     return people
       .map((p) => {
-        const relevant = project.requiredSkillIds.length
-          ? project.requiredSkillIds
-          : skills.map((s) => s.id);
-        const avgSkill =
-          relevant.reduce((sum, sid) => sum + (skillLevels[`${p.id}|${sid}`] || 0), 0) / relevant.length;
-        const available = Math.max(0, 100 - totalsByPerson[p.id]);
-        const score = (avgSkill / 4) * 0.7 + (available / 100) * 0.3;
-        return { person: p, avgSkill, available, score };
+        const avgSkill = relevant.reduce((sum, sid) => sum + (skillLevels[`${p.id}|${sid}`] || 0), 0) / relevant.length;
+        const total = totalsByPerson[p.id] || 0;
+        const available = Math.max(0, 100 - total);
+        const score = (avgSkill / 4) * (skillWeight / 100) + (available / 100) * (capacityWeight / 100);
+        return { person: p, avgSkill, available, total, score };
       })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3);
+      .sort((a, b) => b.score - a.score);
   };
+
+  // Required skills nobody on the team holds at Advanced (3) or Expert (4).
+  const skillGapsFor = (project) =>
+    (project.requiredSkillIds || []).filter((sid) => Math.max(0, ...people.map((p) => skillLevels[`${p.id}|${sid}`] || 0)) < 3);
 
   return (
     <div>
       <div style={{ marginBottom: 18 }}>
         <div style={{ fontSize: 19, fontWeight: 600 }}>Forward capacity</div>
         <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
-          Available capacity today, and suggested fits for upcoming work based on skill level and free capacity.
+          Available capacity today, and every team member ranked against upcoming work by skill level and free
+          capacity.
+        </div>
+      </div>
+
+      <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "16px 18px", marginBottom: 18 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Ranking weights</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, color: "var(--text-muted)", minWidth: 130 }}>Skill match {skillWeight}%</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={skillWeight}
+            onChange={(e) => setSkillWeight(Number(e.target.value))}
+            style={{ flex: 1, minWidth: 140 }}
+          />
+          <span style={{ fontSize: 12, color: "var(--text-muted)", minWidth: 130, textAlign: "right" }}>Free capacity {capacityWeight}%</span>
         </div>
       </div>
 
@@ -1670,7 +1694,9 @@ function ForwardCapacity({ people, skills, skillLevels, upcoming, capacityData, 
       <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Upcoming projects</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 20 }}>
         {upcoming.map((proj) => {
-          const candidates = rank(proj);
+          const rows = rankAll(proj);
+          const gaps = skillGapsFor(proj);
+          const skillCols = (proj.requiredSkillIds || []).map((sid) => skills.find((s) => s.id === sid)).filter(Boolean);
           return (
             <div key={proj.id} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "16px 18px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -1688,15 +1714,73 @@ function ForwardCapacity({ people, skills, skillLevels, upcoming, capacityData, 
                   <X size={14} />
                 </button>
               </div>
-              <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                {candidates.map((c) => (
-                  <div key={c.person.id} style={{ border: "1px solid var(--border)", borderRadius: 5, padding: "8px 12px", minWidth: 150 }}>
-                    <div style={{ fontSize: 12.5, fontWeight: 600 }}>{c.person.name}</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                      avg skill {c.avgSkill.toFixed(1)}/4 · {c.available}% free
-                    </div>
-                  </div>
-                ))}
+
+              {gaps.length > 0 && (
+                <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {gaps.map((sid) => {
+                    const skill = skills.find((s) => s.id === sid);
+                    return (
+                      <span
+                        key={sid}
+                        className="rd-tag"
+                        style={{ background: "var(--danger-light)", color: "var(--danger)", display: "inline-flex", alignItems: "center", gap: 4 }}
+                      >
+                        <AlertTriangle size={11} /> No one Advanced+ in {skill?.name}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div style={{ overflowX: "auto", marginTop: 12 }}>
+                <table className="rd-table" style={{ fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left" }}>Team member</th>
+                      {skillCols.map((s) => (
+                        <th key={s.id}>{s.name}</th>
+                      ))}
+                      <th>Avg skill</th>
+                      <th>Capacity</th>
+                      <th>Score</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r, idx) => (
+                      <tr key={r.person.id} style={idx < 3 ? { background: "var(--accent-light)" } : undefined}>
+                        <td className="rowhead">
+                          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                            {idx < 3 && (
+                              <span style={{ fontSize: 9, fontWeight: 700, color: "var(--accent)", background: "var(--panel)", border: "1px solid var(--accent)", borderRadius: 3, padding: "1px 4px" }}>
+                                TOP {idx + 1}
+                              </span>
+                            )}
+                            <span style={{ fontWeight: 600 }}>{r.person.name}</span>
+                            {r.total >= 90 && (
+                              <AlertTriangle
+                                size={12}
+                                color={r.total > 100 ? "var(--danger)" : "var(--warn)"}
+                                title={r.total > 100 ? `${r.total}% allocated - over-committed` : `${r.total}% allocated - near capacity`}
+                              />
+                            )}
+                          </div>
+                          <div style={{ fontSize: 10.5, color: "var(--text-muted)" }}>{r.person.role}</div>
+                        </td>
+                        {skillCols.map((s) => {
+                          const level = skillLevels[`${r.person.id}|${s.id}`] || 0;
+                          return (
+                            <td key={s.id} style={{ background: levelColor(level) }}>
+                              {level === 0 ? "-" : LEVEL_LABELS[level]}
+                            </td>
+                          );
+                        })}
+                        <td style={{ fontFamily: "var(--mono)" }}>{r.avgSkill.toFixed(1)}/4</td>
+                        <td style={{ fontFamily: "var(--mono)", color: pctColor(r.total) }}>{r.available}% free</td>
+                        <td style={{ fontFamily: "var(--mono)", fontWeight: 700 }}>{Math.round(r.score * 100)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           );
@@ -2444,10 +2528,21 @@ const MANUAL_SECTIONS = [
       <>
         <p>
           Shows free capacity today (100% minus current allocation) per person, and for each upcoming
-          project in the pipeline, the top three suggested people - ranked by a weighted score of 70%
-          average proficiency on the project's required skills and 30% free capacity. Add an upcoming
-          project with its required skills using the form at the bottom; remove one with the X.
+          project in the pipeline, every team member ranked against it - not just a shortlist.
         </p>
+        <ul>
+          <li><strong>Ranking weights</strong> - a slider at the top controls how much the score weighs
+            skill match vs free capacity (defaults to 70% skill / 30% capacity). Adjust it and every
+            project's ranking recalculates immediately.</li>
+          <li>Each project's table shows every person's level in each required skill, their average
+            skill match, free capacity, and overall score, sorted best-fit first. The top 3 are badged
+            "TOP 1/2/3" and highlighted, but everyone stays in the list - people at 90%+ allocation
+            aren't excluded, just flagged with a warning icon next to their name (amber at 90-100%,
+            red over 100%) so you can still see them as an option.</li>
+          <li>If nobody on the team holds Advanced or Expert level in one of the project's required
+            skills, that's called out explicitly above the table as a skill gap.</li>
+        </ul>
+        <p>Add an upcoming project with its required skills using the form at the bottom; remove one with the X.</p>
       </>
     ),
   },
