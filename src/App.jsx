@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText, ThumbsUp, ThumbsDown, GanttChart, Briefcase, KeyRound, LayoutDashboard, Users, Gauge, UploadCloud } from "lucide-react";
+import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText, ThumbsUp, ThumbsDown, GanttChart, Briefcase, KeyRound, LayoutDashboard, Users, Gauge, UploadCloud, LogOut } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -120,12 +120,13 @@ const FIELDSET_RESET = { border: "none", margin: 0, padding: 0, minWidth: 0 };
 // ---------- Shared, realtime-synced state backed by Supabase ----------
 // Table expected: resourcing_data (key text primary key, value jsonb not null, updated_at timestamptz)
 // See README.md for the SQL to create this table.
-function useSupabaseState(key, seed) {
+function useSupabaseState(key, seed, enabled = true) {
   const [value, setValue] = useState(seed);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
 
     async function init() {
@@ -168,7 +169,7 @@ function useSupabaseState(key, seed) {
       cancelled = true;
       supabase.removeChannel(channel);
     };
-  }, [key]);
+  }, [key, enabled]);
 
   const persist = async (next) => {
     setValue(next);
@@ -487,6 +488,26 @@ function buildConsolidatedPDF(people, skills, skillLevels, projects, allocations
 
 export default function App() {
   const [tab, setTab] = useState("dashboard");
+
+  // session === undefined while the initial session check is in flight,
+  // null once we know the visitor is signed out, an object once signed in.
+  const [session, setSession] = useState(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!cancelled) setSession(data.session);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => {
+      cancelled = true;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+  const authed = !!session;
+  const signOut = () => supabase.auth.signOut();
+
   const [editUnlocked, setEditUnlocked] = useState(() => {
     try {
       return localStorage.getItem(EDIT_UNLOCKED_KEY) === "true";
@@ -512,19 +533,23 @@ export default function App() {
 
   const [peopleData, setPeopleData, peopleLoaded, peopleError] = useSupabaseState(
     "people-skills",
-    { people: SEED_PEOPLE, skills: SEED_SKILLS, skillLevels: SEED_SKILL_LEVELS, lockedPeople: SEED_LOCKED_PEOPLE }
+    { people: SEED_PEOPLE, skills: SEED_SKILLS, skillLevels: SEED_SKILL_LEVELS, lockedPeople: SEED_LOCKED_PEOPLE },
+    authed
   );
   const [allocData, setAllocData, allocLoaded, allocError] = useSupabaseState(
     "projects-allocations",
-    { projects: SEED_PROJECTS, allocations: SEED_ALLOCATIONS }
+    { projects: SEED_PROJECTS, allocations: SEED_ALLOCATIONS },
+    authed
   );
   const [upcomingData, setUpcomingData, upcomingLoaded, upcomingError] = useSupabaseState(
     "upcoming-projects",
-    { upcoming: SEED_UPCOMING }
+    { upcoming: SEED_UPCOMING },
+    authed
   );
   const [appSettingsData, setAppSettingsData, appSettingsLoaded, appSettingsError] = useSupabaseState(
     "app-settings",
-    SEED_APP_SETTINGS
+    SEED_APP_SETTINGS,
+    authed
   );
 
   const loaded = peopleLoaded && allocLoaded && upcomingLoaded && appSettingsLoaded;
@@ -659,6 +684,13 @@ export default function App() {
         }
       `}</style>
 
+      {session === undefined ? (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%", color: "var(--text-muted)", fontSize: 13 }}>
+          Checking session...
+        </div>
+      ) : !session ? (
+        <LoginScreen />
+      ) : (
       <div className="rd-shell" style={{ display: "flex", width: "100%" }}>
         <div className="rd-sidebar" style={{ width: 210, background: "var(--sidebar)", display: "flex", flexDirection: "column", flexShrink: 0, paddingTop: 20 }}>
           <div style={{ padding: "0 16px 18px", borderBottom: "1px solid rgba(255,255,255,0.08)", marginBottom: 10 }}>
@@ -692,8 +724,17 @@ export default function App() {
           </button>
           <div style={{ marginTop: "auto", padding: "14px 16px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
             <EditAccessControl editUnlocked={editUnlocked} onUnlock={unlockEdit} onLock={lockEdit} />
-            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", lineHeight: 1.5, marginTop: 8 }}>
-              Live shared data. No login - the edit password only deters accidental changes.
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 10 }}>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={session.user?.email}>
+                {session.user?.email}
+              </div>
+              <button
+                onClick={signOut}
+                title="Log out"
+                style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--sidebar-text)", background: "none", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 4, padding: "3px 7px", cursor: "pointer", flexShrink: 0 }}
+              >
+                <LogOut size={11} /> Log out
+              </button>
             </div>
           </div>
         </div>
@@ -800,6 +841,7 @@ export default function App() {
           )}
         </div>
       </div>
+      )}
     </div>
   );
 }
@@ -2280,6 +2322,67 @@ function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, cl
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// ---------- Login ----------
+// One shared account for the whole team, created in the Supabase dashboard
+// (no public sign-up here). The check happens server-side via Supabase Auth,
+// and Row Level Security requires an authenticated session for any read or
+// write, so this can't be bypassed by editing the client bundle.
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setBusy(true);
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    setBusy(false);
+    if (signInError) setError(signInError.message);
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>
+      <form
+        onSubmit={submit}
+        style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 8, padding: "32px 28px", width: 320, display: "flex", flexDirection: "column", gap: 12 }}
+      >
+        <div>
+          <div style={{ fontSize: 17, fontWeight: 600, color: "var(--text)" }}>Resourcing</div>
+          <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>Sign in with the team login to continue.</div>
+        </div>
+        <input
+          className="rd-text"
+          type="email"
+          placeholder="Email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoFocus
+          required
+        />
+        <input
+          className="rd-text"
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+        />
+        {error && <div style={{ fontSize: 12, color: "var(--danger)" }}>{error}</div>}
+        <button
+          type="submit"
+          disabled={busy}
+          className="rd-add-btn"
+          style={{ justifyContent: "center", borderStyle: "solid", background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" }}
+        >
+          {busy ? "Signing in..." : "Sign in"}
+        </button>
+      </form>
     </div>
   );
 }

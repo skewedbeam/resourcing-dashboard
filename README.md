@@ -1,7 +1,7 @@
 # Resourcing Dashboard
 
 Skill matrix, current utilisation, and forward capacity, in one page, with data
-shared live across everyone who opens the URL (via Supabase).
+shared live across everyone who signs in (via Supabase).
 
 ## 1. Create the Supabase project
 
@@ -17,23 +17,53 @@ create table resourcing_data (
 
 alter table resourcing_data enable row level security;
 
--- No auth in this app: anyone with the anon key can read and write.
--- That is required for a link leadership can open with no login.
--- If that is not acceptable, add Supabase Auth and tighten these policies.
-create policy "public read" on resourcing_data
-  for select using (true);
+-- Requires a signed-in Supabase Auth session for every read and write.
+-- Enforced by the database, so it can't be bypassed by editing the client
+-- bundle or calling the REST API directly with just the anon key.
+create policy "authenticated read" on resourcing_data
+  for select using (auth.role() = 'authenticated');
 
-create policy "public write" on resourcing_data
-  for insert with check (true);
+create policy "authenticated write" on resourcing_data
+  for insert with check (auth.role() = 'authenticated');
 
-create policy "public update" on resourcing_data
-  for update using (true);
+create policy "authenticated update" on resourcing_data
+  for update using (auth.role() = 'authenticated');
 ```
 
 3. In Project Settings -> API, copy the **Project URL** and the **anon public key**.
 4. Also in Project Settings -> API, make sure Realtime is enabled for the
    `resourcing_data` table (Database -> Replication -> toggle it on) so edits
    show up live for everyone without a page refresh.
+
+## 1b. Create the shared login
+
+The app has one login screen shared by the whole team - there's no public
+sign-up page, so only accounts you create can get in.
+
+1. In the Supabase dashboard: **Authentication -> Users -> Add user**.
+2. Enter an email and password for the team to share, and check
+   **Auto Confirm User** (so it doesn't wait on an email that will never be
+   read).
+3. In **Authentication -> Sign In / Providers -> Email**, turn **off**
+   "Allow new users to sign up" so no one else can self-register.
+4. Share that email/password with the team. Anyone who needs their own
+   account can be added the same way later.
+
+### Already have the table from before auth was added?
+
+RLS policies are additive - the old `public read`/`public write`/`public
+update` policies from the original setup will keep allowing anonymous access
+even after adding the new ones above, unless dropped first. In the SQL
+editor, run:
+
+```sql
+drop policy if exists "public read" on resourcing_data;
+drop policy if exists "public write" on resourcing_data;
+drop policy if exists "public update" on resourcing_data;
+```
+
+then run the three `create policy ... auth.role() = 'authenticated'`
+statements from step 2 above if you haven't already.
 
 ## 2. Run it locally
 
@@ -74,9 +104,11 @@ git push -u origin main
 
 ## Notes
 
-- This is a public, no-login tool. Anyone with the URL can view **and edit**.
-  Fine for an internal team link, not fine if this URL ever leaves the
-  organisation.
+- Viewing and editing both require the shared team login (Supabase Auth,
+  enforced by Row Level Security - not just a client-side gate). The
+  separate "edit password" in Settings/the sidebar is a secondary,
+  softer deterrent on top of that, to distinguish view-only browsing from
+  making changes among people who are already signed in.
 - Placeholder people, skills, and projects are seeded once, the first time the
   app runs against an empty table. Edit or delete rows from the app itself, or
   directly in the Supabase Table Editor.
