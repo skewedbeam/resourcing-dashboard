@@ -10,10 +10,11 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText, ThumbsUp, ThumbsDown, GanttChart, Briefcase, KeyRound, LayoutDashboard, Users, Gauge, UploadCloud, LogOut, BookOpen } from "lucide-react";
+import { Grid3x3, Activity, TrendingUp, Plus, X, Lock, Unlock, Check, Pencil, AlertTriangle, Settings, Trash2, History, ShieldAlert, Eye, EyeOff, FileDown, Save, XCircle, FileText, ThumbsUp, ThumbsDown, GanttChart, Briefcase, KeyRound, LayoutDashboard, Users, Gauge, UploadCloud, LogOut, BookOpen, FileSpreadsheet, Upload, DollarSign } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
+import * as XLSX from "xlsx";
 
 // ---------- Design tokens ----------
 const TOKENS = `
@@ -68,8 +69,8 @@ const SEED_SKILL_LEVELS = {
 };
 
 const SEED_PROJECTS = [
-  { id: "pr1", name: "Core Banking Migration - Client A", startDate: "2026-01-05", endDate: "2026-08-28", requiredSkillIds: ["s1", "s3", "s4"] },
-  { id: "pr2", name: "Intranet Modernisation - Client B", startDate: "2026-03-02", endDate: "2026-06-26", requiredSkillIds: ["s2"] },
+  { id: "pr1", name: "Core Banking Migration - Client A", startDate: "2026-01-05", endDate: "2026-08-28", requiredSkillIds: ["s1", "s3", "s4"], proposedFte: 2.5 },
+  { id: "pr2", name: "Intranet Modernisation - Client B", startDate: "2026-03-02", endDate: "2026-06-26", requiredSkillIds: ["s2"], proposedFte: 1.5 },
 ];
 
 // Each allocation is an array of splits/segments (fractional FTE, time-phased),
@@ -277,6 +278,132 @@ function buildFullBackup(state) {
   return { format: "resourcing-app-backup", version: 2, exportedAt: new Date().toISOString(), ...state };
 }
 
+// ---------- Excel (Team + Skill Matrix) import/export ----------
+// A narrower, spreadsheet-friendly companion to the JSON backup above: just
+// the team roster and skill matrix, in a shape people can edit directly in
+// Excel/Sheets rather than only through the app's UI.
+function buildSkillMatrixWorkbook(people, skills, skillLevels) {
+  const hasData = people.length > 0 && skills.length > 0;
+  const skillNames = hasData ? skills.map((s) => s.name) : ["Example Skill A", "Example Skill B"];
+  const teamRows = hasData
+    ? people.map((p) => [p.name, p.role])
+    : [["Jordan Lee", "Solution Architect"], ["Alex Kim", "Integration Developer"]];
+  const matrixRows = hasData
+    ? people.map((p) => [p.name, ...skills.map((s) => LEVEL_LABELS[skillLevels[`${p.id}|${s.id}`] || 0])])
+    : [
+        ["Jordan Lee", "Advanced", "Working"],
+        ["Alex Kim", "Basic", "Expert"],
+      ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.aoa_to_sheet([
+      ["How to use this template"],
+      [""],
+      ['1. Edit the "Team" sheet - one row per team member: Name, Role.'],
+      ['2. Edit the "Skill Matrix" sheet - one row per team member (Name must match the Team sheet), one column per skill.'],
+      ["3. Skill Matrix cell values: None, Basic, Working, Advanced, or Expert (or 0-4). Blank counts as None."],
+      ['4. To add a new skill, add a new column to "Skill Matrix" with the skill name as its header.'],
+      ["5. Save as .xlsx and upload it from Settings -> Import from Excel."],
+      [""],
+      ["Importing replaces the current team, skills and proficiency levels for everyone - it does not merge with what's already there."],
+    ]),
+    "Read me"
+  );
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Name", "Role"], ...teamRows]), "Team");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Name", ...skillNames], ...matrixRows]), "Skill Matrix");
+  return wb;
+}
+
+function parseSkillMatrixWorkbook(arrayBuffer) {
+  const wb = XLSX.read(arrayBuffer, { type: "array" });
+  const teamSheet = wb.Sheets["Team"];
+  const matrixSheet = wb.Sheets["Skill Matrix"];
+  if (!teamSheet || !matrixSheet) {
+    throw new Error('Workbook must have "Team" and "Skill Matrix" sheets - download the template from Settings for the expected format.');
+  }
+
+  const teamRows = XLSX.utils.sheet_to_json(teamSheet, { defval: "" });
+  const people = teamRows
+    .map((row) => ({ name: String(row.Name ?? row.name ?? "").trim(), role: String(row.Role ?? row.role ?? "").trim() }))
+    .filter((p) => p.name);
+  if (!people.length) throw new Error('No rows found in the "Team" sheet.');
+
+  const matrixRows = XLSX.utils.sheet_to_json(matrixSheet, { defval: "" });
+  const skillNameSet = new Set();
+  matrixRows.forEach((row) => {
+    Object.keys(row).forEach((key) => {
+      if (key.trim().toLowerCase() !== "name") skillNameSet.add(key.trim());
+    });
+  });
+  const skillNames = [...skillNameSet];
+
+  const levelByLabel = {};
+  LEVEL_LABELS.forEach((label, i) => {
+    levelByLabel[label.toLowerCase()] = i;
+  });
+
+  const warnings = [];
+  const skillEntries = [];
+  matrixRows.forEach((row) => {
+    const name = String(row.Name ?? row.name ?? "").trim();
+    if (!name) return;
+    skillNames.forEach((skillName) => {
+      const raw = row[skillName];
+      const value = raw == null ? "" : String(raw).trim();
+      if (!value) return;
+      let level;
+      const asNumber = Number(value);
+      if (levelByLabel[value.toLowerCase()] != null) {
+        level = levelByLabel[value.toLowerCase()];
+      } else if (!Number.isNaN(asNumber) && asNumber >= 0 && asNumber <= 4) {
+        level = Math.round(asNumber);
+      } else {
+        warnings.push(`"${value}" for ${name} / ${skillName} isn't a recognised level (None/Basic/Working/Advanced/Expert or 0-4) - treated as None.`);
+        level = 0;
+      }
+      if (level > 0) skillEntries.push({ personName: name, skillName, level });
+    });
+  });
+
+  return { people, skillNames, skillEntries, warnings };
+}
+
+// Assigns ids for the imported roster/skills, reusing an existing id (and
+// lock state) wherever a name matches what's already there, so unrelated
+// data keyed by person/skill id - allocations, upcoming-project requirements
+// - doesn't silently orphan itself on a routine re-import.
+function reconcileImportedSkillMatrix(imported, existingPeople, existingSkills, existingLockedPeople) {
+  const norm = (s) => s.trim().toLowerCase();
+  const findPerson = (name) => existingPeople.find((p) => norm(p.name) === norm(name));
+  const findSkill = (name) => existingSkills.find((s) => norm(s.name) === norm(name));
+
+  const people = imported.people.map((p, i) => {
+    const match = findPerson(p.name);
+    return { id: match ? match.id : `p${Date.now()}_${i}`, name: p.name, role: p.role };
+  });
+
+  const skills = imported.skillNames.map((name, i) => {
+    const match = findSkill(name);
+    return { id: match ? match.id : `s${Date.now()}_${i}`, name };
+  });
+
+  const skillLevels = {};
+  imported.skillEntries.forEach(({ personName, skillName, level }) => {
+    const person = people.find((p) => norm(p.name) === norm(personName));
+    const skill = skills.find((s) => norm(s.name) === norm(skillName));
+    if (person && skill) skillLevels[`${person.id}|${skill.id}`] = level;
+  });
+
+  const lockedPeople = {};
+  people.forEach((p) => {
+    if (existingLockedPeople[p.id]) lockedPeople[p.id] = true;
+  });
+
+  return { people, skills, skillLevels, lockedPeople };
+}
+
 function buildSkillsReport(people, skills, skillLevels) {
   const header = ["Team member", "Role", ...skills.map((s) => s.name)];
   const rows = people.map((p) => [
@@ -357,6 +484,31 @@ function buildUtilisationReport(people, totalsByPerson, proposedTotalsByPerson) 
   return [header, ...rows];
 }
 
+// "Proposed FTE" here is the project's own budget figure (set on the
+// Projects page) - a different thing from a split's "current vs proposed"
+// status. "Allocated FTE" below means current (committed) allocation only.
+function buildBudgetVarianceRows(projects, people, allocations) {
+  return projects.map((pr) => {
+    const allocatedFte = people.reduce((sum, p) => sum + segmentsTotalPct(allocations[`${p.id}|${pr.id}`], "current"), 0) / 100;
+    const proposedFte = Number(pr.proposedFte) || 0;
+    const variance = allocatedFte - proposedFte;
+    const status = Math.abs(variance) < 0.05 ? "On budget" : variance > 0 ? "Over budget" : "Under budget";
+    return { project: pr, proposedFte, allocatedFte, variance, status };
+  });
+}
+
+function buildBudgetVarianceReport(projects, people, allocations) {
+  const header = ["Project", "Proposed FTE (budget)", "Allocated FTE (current)", "Variance", "Status"];
+  const rows = buildBudgetVarianceRows(projects, people, allocations).map((r) => [
+    r.project.name,
+    r.proposedFte.toFixed(2),
+    r.allocatedFte.toFixed(2),
+    `${r.variance >= 0 ? "+" : ""}${r.variance.toFixed(2)}`,
+    r.status,
+  ]);
+  return [header, ...rows];
+}
+
 function buildConsolidatedReport(people, skills, skillLevels, projects, allocations, totalsByPerson, proposedTotalsByPerson) {
   return [
     ["SKILLS REPORT"],
@@ -367,6 +519,9 @@ function buildConsolidatedReport(people, skills, skillLevels, projects, allocati
     [],
     ["UTILISATION REPORT"],
     ...buildUtilisationReport(people, totalsByPerson, proposedTotalsByPerson),
+    [],
+    ["BUDGET VARIANCE REPORT (proposed vs allocated FTE)"],
+    ...buildBudgetVarianceReport(projects, people, allocations),
   ];
 }
 
@@ -460,6 +615,20 @@ function buildUtilisationPDF(people, totalsByPerson, proposedTotalsByPerson) {
   return doc;
 }
 
+function buildBudgetVariancePDF(projects, people, allocations) {
+  const doc = newReportDoc("Budget Variance - Proposed vs Allocated FTE");
+  const head = ["Project", "Proposed FTE", "Allocated FTE", "Variance", "Status"];
+  const body = buildBudgetVarianceRows(projects, people, allocations).map((r) => [
+    r.project.name,
+    r.proposedFte.toFixed(2),
+    r.allocatedFte.toFixed(2),
+    `${r.variance >= 0 ? "+" : ""}${r.variance.toFixed(2)}`,
+    r.status,
+  ]);
+  addTableSection(doc, 76, "Proposed (budgeted) vs allocated FTE per project", null, head, body);
+  return doc;
+}
+
 function buildConsolidatedPDF(people, skills, skillLevels, projects, allocations, totalsByPerson, proposedTotalsByPerson) {
   const doc = newReportDoc("Resourcing Consolidated Report");
   addTableSection(
@@ -487,6 +656,19 @@ function buildConsolidatedPDF(people, skills, skillLevels, projects, allocations
     return [p.name, p.role, total, fte(total), proposed, fte(proposed), Math.max(0, 100 - total), total > 100 ? "Over-allocated" : total >= 90 ? "Near capacity" : "OK"];
   });
   addTableSection(doc, 66, "Current vs proposed allocation & utilisation", null, uHead, uBody);
+
+  doc.addPage();
+  doc.setFontSize(14);
+  doc.text("Budget Variance", 40, 40);
+  const bHead = ["Project", "Proposed FTE", "Allocated FTE", "Variance", "Status"];
+  const bBody = buildBudgetVarianceRows(projects, people, allocations).map((r) => [
+    r.project.name,
+    r.proposedFte.toFixed(2),
+    r.allocatedFte.toFixed(2),
+    `${r.variance >= 0 ? "+" : ""}${r.variance.toFixed(2)}`,
+    r.status,
+  ]);
+  addTableSection(doc, 66, "Proposed (budgeted) vs allocated FTE per project", null, bHead, bBody);
 
   return doc;
 }
@@ -772,6 +954,8 @@ export default function App() {
               <ProjectsPage
                 projects={projects}
                 skills={skills}
+                people={people}
+                allocations={allocations}
                 onAddProject={(project) => setAllocData({ projects: [...projects, project], allocations })}
                 onUpdateProject={(id, updates) => setAllocData({ projects: projects.map((p) => (p.id === id ? { ...p, ...updates } : p)), allocations })}
                 onRemoveProject={(id) => setAllocData({ projects: projects.filter((p) => p.id !== id), allocations })}
@@ -835,19 +1019,21 @@ export default function App() {
           ) : tab === "manual" ? (
             <UserManual />
           ) : (
-            <fieldset disabled={!editUnlocked} style={FIELDSET_RESET}>
-              <SettingsPage
-                people={people}
-                skills={skills}
-                projects={projects}
-                upcoming={upcoming}
-                logRetentionDays={logRetentionDays}
-                clearLog={clearLog}
-                onClearScope={clearScope}
-                onSetRetentionDays={(days) => setAppSettingsData({ logRetentionDays: days, clearLog })}
-                onImportBackup={importAllData}
-              />
-            </fieldset>
+            <SettingsPage
+              editUnlocked={editUnlocked}
+              people={people}
+              skills={skills}
+              skillLevels={skillLevels}
+              lockedPeople={lockedPeople}
+              projects={projects}
+              upcoming={upcoming}
+              logRetentionDays={logRetentionDays}
+              clearLog={clearLog}
+              onClearScope={clearScope}
+              onSetRetentionDays={(days) => setAppSettingsData({ logRetentionDays: days, clearLog })}
+              onImportBackup={importAllData}
+              onImportSkillMatrix={(next) => setPeopleData(next)}
+            />
           )}
         </div>
       </div>
@@ -873,8 +1059,12 @@ function Dashboard({ people, skills, skillLevels, projects, allocations, upcomin
         .map((p) => ({ person: p, pct: segmentsTotalPct(allocations[`${p.id}|${pr.id}`], "current") }))
         .filter((r) => r.pct > 0);
       const totalAlloc = rows.reduce((s, r) => s + r.pct, 0);
-      return { project: pr, headcount: rows.length, totalAlloc };
+      const proposedFte = Number(pr.proposedFte) || 0;
+      const allocatedFte = totalAlloc / 100;
+      const variance = allocatedFte - proposedFte;
+      return { project: pr, headcount: rows.length, totalAlloc, proposedFte, allocatedFte, variance };
     });
+    const overBudgetCount = projectRows.filter((r) => r.proposedFte > 0 && r.variance >= 0.05).length;
 
     const teamRows = people
       .map((p) => ({ person: p, total: totalsByPerson[p.id] || 0, proposed: proposedTotalsByPerson[p.id] || 0 }))
@@ -895,7 +1085,7 @@ function Dashboard({ people, skills, skillLevels, projects, allocations, upcomin
       return { project: u, skillRows, gapCount: skillRows.filter((r) => !r.covered).length };
     });
 
-    return { avgUtil, overCommitted, benchFte, pendingProposals, projectRows, teamRows, pipelineCoverage };
+    return { avgUtil, overCommitted, benchFte, pendingProposals, projectRows, teamRows, pipelineCoverage, overBudgetCount };
   }, [people, skills, skillLevels, projects, allocations, upcoming, totalsByPerson, proposedTotalsByPerson]);
 
   const cards = [
@@ -906,6 +1096,7 @@ function Dashboard({ people, skills, skillLevels, projects, allocations, upcomin
     { label: "Bench capacity", value: `${stats.benchFte.toFixed(1)} FTE`, icon: TrendingUp, tab: "forward" },
     { label: "Pipeline projects", value: upcoming.length, icon: LayoutDashboard, tab: "forward" },
     { label: "Pending proposals", value: stats.pendingProposals, icon: ThumbsUp, tab: "current", warn: stats.pendingProposals > 0 },
+    { label: "Over budget (FTE)", value: stats.overBudgetCount, icon: DollarSign, tab: "reports", warn: stats.overBudgetCount > 0 },
   ];
 
   return (
@@ -983,28 +1174,35 @@ function Dashboard({ people, skills, skillLevels, projects, allocations, upcomin
         </div>
 
         <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "16px 18px" }}>
-          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Projects overview</div>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Projects overview</div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 12 }}>
+            Variance is allocated FTE minus proposed (budgeted) FTE - positive means over budget.
+          </div>
           <table className="rd-table" style={{ fontSize: 12.5 }}>
             <thead>
               <tr>
                 <th style={{ textAlign: "left" }}>Project</th>
                 <th>People</th>
-                <th>Total %</th>
-                <th>FTE</th>
+                <th>Allocated FTE</th>
+                <th>Proposed FTE</th>
+                <th>Variance</th>
               </tr>
             </thead>
             <tbody>
               {stats.projectRows.length === 0 && (
                 <tr>
-                  <td colSpan={4} style={{ color: "var(--text-muted)", fontSize: 12 }}>No projects yet.</td>
+                  <td colSpan={5} style={{ color: "var(--text-muted)", fontSize: 12 }}>No projects yet.</td>
                 </tr>
               )}
-              {stats.projectRows.map(({ project, headcount, totalAlloc }) => (
+              {stats.projectRows.map(({ project, headcount, allocatedFte, proposedFte, variance }) => (
                 <tr key={project.id}>
                   <td className="rowhead" style={{ fontWeight: 600 }}>{project.name}</td>
                   <td style={{ fontFamily: "var(--mono)" }}>{headcount}</td>
-                  <td style={{ fontFamily: "var(--mono)" }}>{totalAlloc}%</td>
-                  <td style={{ fontFamily: "var(--mono)" }}>{fte(totalAlloc)}</td>
+                  <td style={{ fontFamily: "var(--mono)" }}>{allocatedFte.toFixed(2)}</td>
+                  <td style={{ fontFamily: "var(--mono)" }}>{proposedFte.toFixed(2)}</td>
+                  <td style={{ fontFamily: "var(--mono)", fontWeight: 700, color: proposedFte === 0 ? "var(--text-muted)" : Math.abs(variance) < 0.05 ? "var(--accent)" : variance > 0 ? "var(--danger)" : "var(--warn)" }}>
+                    {proposedFte === 0 ? "-" : `${variance >= 0 ? "+" : ""}${variance.toFixed(2)}`}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -1066,20 +1264,21 @@ function Dashboard({ people, skills, skillLevels, projects, allocations, upcomin
 }
 
 // ---------- Projects ----------
-function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemoveProject }) {
+function ProjectsPage({ projects, skills, people, allocations, onAddProject, onUpdateProject, onRemoveProject }) {
   const [editingId, setEditingId] = useState(null);
-  const [draft, setDraft] = useState({ name: "", startDate: "", endDate: "", requiredSkillIds: [] });
+  const [draft, setDraft] = useState({ name: "", startDate: "", endDate: "", requiredSkillIds: [], proposedFte: "" });
   const [editDateError, setEditDateError] = useState(false);
 
   const [newName, setNewName] = useState("");
   const [newStart, setNewStart] = useState("");
   const [newEnd, setNewEnd] = useState("");
   const [newSkillIds, setNewSkillIds] = useState([]);
+  const [newProposedFte, setNewProposedFte] = useState("");
   const [addDateError, setAddDateError] = useState(false);
 
   const startEdit = (pr) => {
     setEditingId(pr.id);
-    setDraft({ name: pr.name, startDate: pr.startDate || "", endDate: pr.endDate || "", requiredSkillIds: pr.requiredSkillIds || [] });
+    setDraft({ name: pr.name, startDate: pr.startDate || "", endDate: pr.endDate || "", requiredSkillIds: pr.requiredSkillIds || [], proposedFte: pr.proposedFte ? String(pr.proposedFte) : "" });
     setEditDateError(false);
   };
   const cancelEdit = () => setEditingId(null);
@@ -1089,7 +1288,13 @@ function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemov
       setEditDateError(true);
       return;
     }
-    onUpdateProject(editingId, { name: draft.name.trim(), startDate: draft.startDate, endDate: draft.endDate, requiredSkillIds: draft.requiredSkillIds });
+    onUpdateProject(editingId, {
+      name: draft.name.trim(),
+      startDate: draft.startDate,
+      endDate: draft.endDate,
+      requiredSkillIds: draft.requiredSkillIds,
+      proposedFte: Math.max(0, Number(draft.proposedFte) || 0),
+    });
     setEditingId(null);
   };
   const toggleDraftSkill = (id) =>
@@ -1102,10 +1307,18 @@ function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemov
       setAddDateError(true);
       return;
     }
-    onAddProject({ id: `pr${Date.now()}`, name: newName.trim(), startDate: newStart, endDate: newEnd, requiredSkillIds: newSkillIds });
+    onAddProject({
+      id: `pr${Date.now()}`,
+      name: newName.trim(),
+      startDate: newStart,
+      endDate: newEnd,
+      requiredSkillIds: newSkillIds,
+      proposedFte: Math.max(0, Number(newProposedFte) || 0),
+    });
     setNewName("");
     setNewStart("");
     setNewEnd("");
+    setNewProposedFte("");
     setNewSkillIds([]);
     setAddDateError(false);
   };
@@ -1115,8 +1328,8 @@ function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemov
       <div style={{ marginBottom: 18 }}>
         <div style={{ fontSize: 19, fontWeight: 600 }}>Projects</div>
         <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
-          Master list of projects/programs: name, duration and required skills. Add, edit and remove projects here -
-          Current Utilisation only manages who's allocated to them.
+          Master list of projects/programs: name, duration, required skills, and the proposed (budgeted) FTE.
+          Add, edit and remove projects here - Current Utilisation only manages who's allocated to them.
         </div>
       </div>
 
@@ -1150,6 +1363,18 @@ function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemov
                     <AlertTriangle size={12} /> End date can't be before the start date.
                   </div>
                 )}
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-muted)" }}>
+                  Proposed FTE (budget)
+                  <input
+                    className="rd-input"
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={draft.proposedFte}
+                    onChange={(e) => setDraft((d) => ({ ...d, proposedFte: e.target.value }))}
+                    style={{ width: 70 }}
+                  />
+                </label>
                 <div>
                   <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 6 }}>Required skills</div>
                   {skills.map((s) => (
@@ -1182,6 +1407,23 @@ function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemov
                       {formatDate(pr.startDate) || "?"} &ndash; {formatDate(pr.endDate) || "?"}
                     </div>
                   )}
+                  {(() => {
+                    const allocatedFte = people.reduce((sum, p) => sum + segmentsTotalPct(allocations[`${p.id}|${pr.id}`], "current"), 0) / 100;
+                    const proposedFte = Number(pr.proposedFte) || 0;
+                    const variance = allocatedFte - proposedFte;
+                    return (
+                      <div style={{ fontSize: 12, marginTop: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <span style={{ color: "var(--text-muted)" }}>
+                          Proposed {proposedFte.toFixed(2)} FTE &middot; Allocated {allocatedFte.toFixed(2)} FTE
+                        </span>
+                        {proposedFte > 0 && Math.abs(variance) >= 0.05 && (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontWeight: 600, color: variance > 0 ? "var(--danger)" : "var(--warn)" }}>
+                            <DollarSign size={11} /> {variance > 0 ? "+" : ""}{variance.toFixed(2)} FTE {variance > 0 ? "over budget" : "under budget"}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
                   <div style={{ marginTop: 8 }}>
                     {(pr.requiredSkillIds || []).length === 0 ? (
                       <span style={{ fontSize: 11.5, color: "var(--text-muted)", fontStyle: "italic" }}>No required skills set</span>
@@ -1230,6 +1472,18 @@ function ProjectsPage({ projects, skills, onAddProject, onUpdateProject, onRemov
             <AlertTriangle size={12} /> End date can't be before the start date.
           </div>
         )}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
+          Proposed FTE (budget)
+          <input
+            className="rd-input"
+            type="number"
+            min="0"
+            step="0.1"
+            value={newProposedFte}
+            onChange={(e) => setNewProposedFte(e.target.value)}
+            style={{ width: 70 }}
+          />
+        </label>
         <div style={{ marginBottom: 10 }}>
           <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 6 }}>Required skills</div>
           {skills.map((s) => (
@@ -2148,7 +2402,16 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
       onDownloadCSV: () => downloadCSV(`utilisation-report-${stamp}.csv`, buildUtilisationReport(people, totalsByPerson, proposedTotalsByPerson)),
       onDownloadPDF: () => buildUtilisationPDF(people, totalsByPerson, proposedTotalsByPerson).save(`utilisation-report-${stamp}.pdf`),
     },
+    {
+      key: "budget",
+      label: "Budget variance",
+      detail: `Proposed (budgeted) vs allocated FTE per project - flags discrepancies that could impact financials`,
+      onDownloadCSV: () => downloadCSV(`budget-variance-${stamp}.csv`, buildBudgetVarianceReport(projects, people, allocations)),
+      onDownloadPDF: () => buildBudgetVariancePDF(projects, people, allocations).save(`budget-variance-${stamp}.pdf`),
+    },
   ];
+
+  const budgetRows = buildBudgetVarianceRows(projects, people, allocations);
 
   return (
     <div>
@@ -2207,6 +2470,44 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
                 </tr>
               );
             })}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Budget variance, live</div>
+      <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
+        Proposed (budgeted) FTE per project, set on the Projects page, vs allocated (current) FTE - a gap here can
+        mean cost overrun (allocated more than budgeted) or under-delivery (allocated less).
+      </div>
+      <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 6, marginBottom: 26 }}>
+        <table className="rd-table">
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left" }}>Project</th>
+              <th>Proposed FTE</th>
+              <th>Allocated FTE</th>
+              <th>Variance</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {budgetRows.length === 0 ? (
+              <tr>
+                <td colSpan={5} style={{ textAlign: "left", color: "var(--text-muted)", fontStyle: "italic" }}>No projects yet.</td>
+              </tr>
+            ) : (
+              budgetRows.map((r) => (
+                <tr key={r.project.id}>
+                  <td style={{ textAlign: "left", fontWeight: 600 }}>{r.project.name}</td>
+                  <td style={{ fontFamily: "var(--mono)" }}>{r.proposedFte.toFixed(2)}</td>
+                  <td style={{ fontFamily: "var(--mono)" }}>{r.allocatedFte.toFixed(2)}</td>
+                  <td style={{ fontFamily: "var(--mono)", fontWeight: 700, color: r.proposedFte === 0 ? "var(--text-muted)" : r.status === "On budget" ? "var(--accent)" : r.variance > 0 ? "var(--danger)" : "var(--warn)" }}>
+                    {r.proposedFte === 0 ? "-" : `${r.variance >= 0 ? "+" : ""}${r.variance.toFixed(2)}`}
+                  </td>
+                  <td>{r.proposedFte === 0 ? "No budget set" : r.status}</td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>
@@ -2270,7 +2571,7 @@ function ReportsPage({ people, skills, skillLevels, projects, allocations, total
 }
 
 // ---------- Settings ----------
-function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, clearLog, onClearScope, onSetRetentionDays, onImportBackup }) {
+function SettingsPage({ editUnlocked, people, skills, skillLevels, lockedPeople, projects, upcoming, logRetentionDays, clearLog, onClearScope, onSetRetentionDays, onImportBackup, onImportSkillMatrix }) {
   const [pendingScope, setPendingScope] = useState(null);
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -2284,6 +2585,54 @@ function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, cl
   const [importError, setImportError] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const importInputRef = useRef(null);
+
+  const [xlsxFile, setXlsxFile] = useState(null);
+  const [xlsxParsed, setXlsxParsed] = useState(null);
+  const [xlsxPassword, setXlsxPassword] = useState("");
+  const [xlsxError, setXlsxError] = useState("");
+  const [xlsxBusy, setXlsxBusy] = useState(false);
+  const xlsxInputRef = useRef(null);
+
+  const downloadTemplate = () => {
+    const wb = buildSkillMatrixWorkbook(people, skills, skillLevels);
+    XLSX.writeFile(wb, `team-skill-matrix-template-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  const pickXlsxFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    setXlsxError("");
+    setXlsxFile(null);
+    setXlsxParsed(null);
+    if (!file) return;
+    try {
+      const buffer = await file.arrayBuffer();
+      const parsed = parseSkillMatrixWorkbook(buffer);
+      setXlsxFile(file.name);
+      setXlsxParsed(parsed);
+    } catch (err) {
+      setXlsxError(err.message || String(err));
+    }
+  };
+
+  const cancelXlsxImport = () => {
+    setXlsxFile(null);
+    setXlsxParsed(null);
+    setXlsxPassword("");
+    setXlsxError("");
+  };
+
+  const confirmXlsxImport = async () => {
+    if (xlsxPassword !== CLEAR_DATA_PASSWORD) {
+      setXlsxError("Incorrect password.");
+      return;
+    }
+    setXlsxBusy(true);
+    const reconciled = reconcileImportedSkillMatrix(xlsxParsed, people, skills, lockedPeople);
+    await onImportSkillMatrix(reconciled);
+    setXlsxBusy(false);
+    cancelXlsxImport();
+  };
 
   const pickImportFile = async (e) => {
     const file = e.target.files?.[0];
@@ -2369,9 +2718,81 @@ function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, cl
       <div style={{ marginBottom: 18 }}>
         <div style={{ fontSize: 19, fontWeight: 600 }}>Settings</div>
         <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 3 }}>
-          Clear stored data. This updates the shared data for everyone immediately and cannot be undone.
+          Bulk-manage data via Excel, restore a backup, or clear stored data. Changes below update the shared
+          data for everyone immediately.
         </div>
       </div>
+
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+        <FileSpreadsheet size={15} /> Team & skill matrix (Excel)
+      </div>
+      <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "14px 16px", marginBottom: 28 }}>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
+          Download the current team and skill matrix as an editable spreadsheet, update it, and upload it back to
+          replace the team roster, skills and proficiency levels in one go - handy for bulk edits that would be
+          tedious cell-by-cell in the app.
+        </div>
+        <button className="rd-add-btn" onClick={downloadTemplate} style={{ marginBottom: 14 }}>
+          <FileSpreadsheet size={13} /> Download Excel template
+        </button>
+
+        <fieldset disabled={!editUnlocked} style={FIELDSET_RESET}>
+          {!xlsxParsed ? (
+            <>
+              <input ref={xlsxInputRef} type="file" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style={{ display: "none" }} onChange={pickXlsxFile} />
+              <button className="rd-add-btn" onClick={() => xlsxInputRef.current?.click()}>
+                <Upload size={13} /> Choose Excel file to import
+              </button>
+              {xlsxError && <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 8 }}>{xlsxError}</div>}
+            </>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 12.5 }}>
+                Selected: <strong>{xlsxFile}</strong> &middot; {xlsxParsed.people.length} team member{xlsxParsed.people.length === 1 ? "" : "s"},{" "}
+                {xlsxParsed.skillNames.length} skill{xlsxParsed.skillNames.length === 1 ? "" : "s"}, {xlsxParsed.skillEntries.length} proficiency entries
+              </div>
+              {xlsxParsed.warnings.length > 0 && (
+                <div style={{ fontSize: 11.5, color: "var(--warn)", background: "var(--warn-light)", borderRadius: 4, padding: "6px 8px" }}>
+                  {xlsxParsed.warnings.map((w, i) => (
+                    <div key={i}>{w}</div>
+                  ))}
+                </div>
+              )}
+              <div style={{ fontSize: 12, color: "var(--danger)", display: "flex", alignItems: "center", gap: 5 }}>
+                <ShieldAlert size={13} /> Enter the password to replace the current team, skills and skill matrix with this file.
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <div style={{ position: "relative" }}>
+                  <input
+                    className="rd-text"
+                    type={showPassword ? "text" : "password"}
+                    placeholder="Password"
+                    value={xlsxPassword}
+                    onChange={(e) => setXlsxPassword(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") confirmXlsxImport(); }}
+                    style={{ minWidth: 180, paddingRight: 30 }}
+                    autoFocus
+                  />
+                  <button
+                    onClick={() => setShowPassword((v) => !v)}
+                    title={showPassword ? "Hide password" : "Show password"}
+                    style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", border: "none", background: "none", cursor: "pointer", color: "var(--text-muted)" }}
+                  >
+                    {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+                <button className="rd-add-btn" style={{ color: "var(--danger)", borderColor: "var(--danger)" }} onClick={confirmXlsxImport} disabled={xlsxBusy}>
+                  <Upload size={13} /> {xlsxBusy ? "Importing..." : "Confirm import"}
+                </button>
+                <button className="rd-remove-btn" onClick={cancelXlsxImport} style={{ fontSize: 12.5 }}>Cancel</button>
+              </div>
+              {xlsxError && <div style={{ fontSize: 12, color: "var(--danger)" }}>{xlsxError}</div>}
+            </div>
+          )}
+        </fieldset>
+      </div>
+
+      <fieldset disabled={!editUnlocked} style={FIELDSET_RESET}>
 
       <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>Danger zone</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 28 }}>
@@ -2523,6 +2944,7 @@ function SettingsPage({ people, skills, projects, upcoming, logRetentionDays, cl
           </tbody>
         </table>
       </div>
+      </fieldset>
     </div>
   );
 }
@@ -2558,10 +2980,12 @@ const MANUAL_SECTIONS = [
         <p>The landing page - a ready reckoner of where things stand:</p>
         <ul>
           <li>Stat cards for team size, active projects, average utilisation, anyone over-committed,
-            spare bench capacity (in FTE), pipeline projects, and proposed splits awaiting a decision.
-            Click any card to jump to the page it's about.</li>
+            spare bench capacity (in FTE), pipeline projects, proposed splits awaiting a decision, and
+            how many projects are over their proposed FTE budget. Click any card to jump to the page
+            it's about.</li>
           <li>A team allocation table (current % and status per person) and a projects overview table
-            (headcount, total %, FTE per project).</li>
+            (headcount, allocated FTE, proposed/budgeted FTE, and the variance between them, color-coded
+            over/under budget).</li>
           <li>A pipeline &amp; skill gaps panel - flags any upcoming project that needs a skill nobody
             on the team currently holds at Advanced level or higher.</li>
         </ul>
@@ -2575,9 +2999,17 @@ const MANUAL_SECTIONS = [
       <>
         <p>
           The master list of active projects/programs. Add, edit or remove a project here - name,
-          start/end dates, and the skills it requires (used for the skill-gap check and the Forward
-          Capacity ranking). Current Utilisation only manages who's allocated to projects already on
-          this list; it doesn't add or remove projects itself.
+          start/end dates, the skills it requires (used for the skill-gap check and the Forward
+          Capacity ranking), and its <strong>proposed FTE</strong>. Current Utilisation only manages
+          who's allocated to projects already on this list; it doesn't add or remove projects itself.
+        </p>
+        <p>
+          <strong>Proposed FTE</strong> is the FTE that was proposed/budgeted for the project - not to
+          be confused with a split's "current vs proposed" status in Current Utilisation, which is a
+          different, per-person concept. Each project's card shows this figure next to the FTE actually
+          allocated (summed from everyone's current splits) and flags the difference as over or under
+          budget once it's off by 0.05 FTE or more. See Reports &rarr; Budget variance for the full
+          picture across every project.
         </p>
       </>
     ),
@@ -2670,9 +3102,10 @@ const MANUAL_SECTIONS = [
       <>
         <p>
           Download-ready summaries: a skills/proficiency report, an allocation-by-project report
-          (grouped by project, ordered by period, current vs proposed), and a per-resource utilisation
-          report - each as CSV or PDF, or all three combined into one consolidated file. The live tables
-          above them mirror the same data on-screen.
+          (grouped by project, ordered by period, current vs proposed), a per-resource utilisation
+          report, and a <strong>budget variance report</strong> (proposed vs allocated FTE per project,
+          flagging discrepancies that could impact financials) - each as CSV or PDF, or all four combined
+          into one consolidated file. The live tables above them mirror the same data on-screen.
         </p>
         <p>
           Separately, <strong>"Export JSON backup"</strong> at the bottom of this page downloads every
@@ -2689,7 +3122,17 @@ const MANUAL_SECTIONS = [
     body: (
       <>
         <p>
-          Two destructive actions live here, both password-gated (the same edit-adjacent "clear data"
+          <strong>Team &amp; skill matrix (Excel)</strong> - download a spreadsheet template
+          (pre-filled with the current team and skill matrix, or a small example if there's nothing yet)
+          from the "Read me" sheet's instructions, edit it in Excel or Sheets, then upload it back to
+          replace the team roster, skills and proficiency levels in one go. The template has two sheets:
+          "Team" (Name, Role) and "Skill Matrix" (one row per person, one column per skill, valued
+          None/Basic/Working/Advanced/Expert or 0-4). Re-importing matches people and skills by name to
+          keep existing allocations and locks intact; anything not in the file is removed. The download
+          button works in view-only mode; the actual import is password-gated like the actions below.
+        </p>
+        <p>
+          Two further destructive actions, both password-gated (the same edit-adjacent "clear data"
           password) so they can't happen by accident:
         </p>
         <ul>
